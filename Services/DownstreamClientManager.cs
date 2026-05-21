@@ -9,13 +9,13 @@ namespace EntraMcpProxy.Services;
 public class DownstreamClientManager : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, McpClient> _clients = new();
-    private readonly IReadOnlyList<DownstreamServerConfig> _configs;
+    private readonly IReadOnlyList<DownstreamServerOptions> _configs;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<DownstreamClientManager> _logger;
     private readonly IHttpContextAccessor _httpContextAccessor;
 
     public DownstreamClientManager(
-        IOptions<List<DownstreamServerConfig>> configs,
+        IOptions<List<DownstreamServerOptions>> configs,
         ILoggerFactory loggerFactory,
         IHttpContextAccessor httpContextAccessor)
     {
@@ -60,9 +60,9 @@ public class DownstreamClientManager : IAsyncDisposable
     public IReadOnlyList<(string Prefix, McpClient Client)> GetAllClients() =>
         _clients.Select(kvp => (kvp.Key, kvp.Value)).ToList();
 
-    public IReadOnlyList<DownstreamServerConfig> GetConfigs() => _configs;
+    public IReadOnlyList<DownstreamServerOptions> GetConfigs() => _configs;
 
-    private async Task<McpClient> ConnectAsync(DownstreamServerConfig config, CancellationToken cancellationToken)
+    private async Task<McpClient> ConnectAsync(DownstreamServerOptions config, CancellationToken cancellationToken)
     {
         var httpClient = CreateHttpClient(config);
 
@@ -87,7 +87,7 @@ public class DownstreamClientManager : IAsyncDisposable
         return client;
     }
 
-    private HttpClient CreateHttpClient(DownstreamServerConfig config)
+    private HttpClient CreateHttpClient(DownstreamServerOptions config)
     {
         if (string.Equals(config.AuthType, "EntraId", StringComparison.OrdinalIgnoreCase))
         {

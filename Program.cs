@@ -54,7 +54,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddHttpContextAccessor();
 
 // --- Downstream configuration ---
-builder.Services.Configure<List<DownstreamServerConfig>>(
+builder.Services.Configure<List<DownstreamServerOptions>>(
     builder.Configuration.GetSection("DownstreamServers"));
 
 // --- Services ---
