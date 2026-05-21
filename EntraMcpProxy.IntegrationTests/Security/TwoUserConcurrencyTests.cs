@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using EntraMcpProxy.Auth;
@@ -39,7 +40,7 @@ namespace EntraMcpProxy.IntegrationTests.Security;
 ///                   │  OBO: exchanges inbound JWT for per-user downstream token
 ///                   ↓
 ///              recording MCP TestServer (ASP.NET Core in-process, MapMcp)
-///              recording all inbound Authorization headers
+///              recording all inbound Authorization headers AND raw bodies
 ///
 /// FakeEntra's token endpoint is configured dynamically to embed a fingerprint
 /// of the OBO assertion in the returned access_token, so alice's and bob's
@@ -52,8 +53,12 @@ namespace EntraMcpProxy.IntegrationTests.Security;
 /// OBO cache is keyed on (oid, tid, aud, scope) via OboCacheKey, not on the
 /// raw token, so there is no cross-user collision.
 ///
-/// After N concurrent calls from each user the recording downstream must show
-/// exactly 2 distinct Authorization header values — one per user.
+/// Strengthened C2 closure: each call is tagged with a per-user _session
+/// argument so we can partition recorded downstream calls by user after the
+/// fact and assert ALL alice-tagged calls share one OBO token AND ALL
+/// bob-tagged calls share the OTHER (distinct) token.  This is the strongest
+/// possible 1:1 cross-user-isolation proof — it would fail even if only ONE
+/// call leaked across users.
 /// </summary>
 public class TwoUserConcurrencyTests
 {
@@ -70,9 +75,10 @@ public class TwoUserConcurrencyTests
         await using var entra = new FakeEntra(tenantId, audience: ProxyClientId);
 
         // Recording downstream MCP server: a real ASP.NET Core TestServer with
-        // MapMcp(). Records the Authorization header on every inbound MCP request.
-        var recordedAuths = new ConcurrentBag<(string Method, string? Auth)>();
-        using var downstreamHost = await BuildRecordingDownstreamAsync(recordedAuths);
+        // MapMcp(). Records Authorization header AND raw request body on every
+        // inbound MCP request so we can correlate user tag → token.
+        var recorded = new ConcurrentBag<(string Method, string? Auth, string? RawBody)>();
+        using var downstreamHost = await BuildRecordingDownstreamAsync(recorded);
         var downstreamTestServer = downstreamHost.GetTestServer();
 
         // Dynamic FakeEntra token endpoint:
@@ -101,39 +107,60 @@ public class TwoUserConcurrencyTests
         // Wait for ToolAggregatorService startup to register fake__ping.
         await WaitForToolRegistrationAsync(factory, aliceToken, timeoutMs: 30_000);
 
-        // ─── concurrent calls from both users ──────────────────────────────────
+        // ─── concurrent calls from both users (tagged for 1:1 assertion) ───────
         await using var aliceClient = await CreateProxyMcpClientAsync(factory, aliceToken);
         await using var bobClient   = await CreateProxyMcpClientAsync(factory,   bobToken);
 
+        // Embed a _session tag in arguments so we can identify each call's
+        // originating user after Task.WhenAll (which does not preserve order).
+        var aliceArgs = new Dictionary<string, JsonElement>
+        {
+            ["_session"] = JsonDocument.Parse("\"alice\"").RootElement,
+        };
+        var bobArgs = new Dictionary<string, JsonElement>
+        {
+            ["_session"] = JsonDocument.Parse("\"bob\"").RootElement,
+        };
+
         var aliceTasks = Enumerable.Range(0, CallsPerUser)
             .Select(_ => aliceClient.CallToolAsync(
-                new CallToolRequestParams { Name = "fake__ping" }).AsTask());
+                new CallToolRequestParams { Name = "fake__ping", Arguments = aliceArgs }).AsTask());
         var bobTasks = Enumerable.Range(0, CallsPerUser)
             .Select(_ => bobClient.CallToolAsync(
-                new CallToolRequestParams { Name = "fake__ping" }).AsTask());
+                new CallToolRequestParams { Name = "fake__ping", Arguments = bobArgs }).AsTask());
 
         await Task.WhenAll(aliceTasks.Concat(bobTasks));
 
-        // ─── C2 closure assertions ─────────────────────────────────────────────
-        var toolCalls = recordedAuths
+        // ─── C2 closure assertions — strongest possible 1:1 proof ────────────
+        var toolCalls = recorded
             .Where(x => x.Method == "tools/call")
             .ToList();
 
         toolCalls.Should().HaveCount(2 * CallsPerUser,
             $"all tools/call requests must reach the downstream; got {toolCalls.Count}");
 
-        var distinctAuths = toolCalls
-            .Select(x => x.Auth)
-            .Where(a => a is not null)
-            .Distinct()
-            .ToList();
-
-        distinctAuths.Should().HaveCount(2,
-            "two users must produce two distinct downstream OBO tokens — never crosstalk. " +
-            $"Actual: [{string.Join(", ", distinctAuths)}]");
-
         toolCalls.Should().AllSatisfy(x =>
             x.Auth.Should().NotBeNullOrEmpty("every downstream call must carry an Authorization header"));
+
+        // Partition by the _session tag embedded in the request body.
+        // The JSON-RPC body contains the arguments we passed, so the tag is
+        // always present regardless of MCP SDK argument handling.
+        static bool IsAlice((string Method, string? Auth, string? RawBody) c) =>
+            c.RawBody is not null && c.RawBody.Contains("\"_session\":\"alice\"");
+        static bool IsBob((string Method, string? Auth, string? RawBody) c) =>
+            c.RawBody is not null && c.RawBody.Contains("\"_session\":\"bob\"");
+
+        var aliceAuths = toolCalls.Where(IsAlice).Select(x => x.Auth).Distinct().ToList();
+        var bobAuths   = toolCalls.Where(IsBob).Select(x => x.Auth).Distinct().ToList();
+
+        aliceAuths.Should().HaveCount(1,
+            "all alice-tagged calls must share exactly one OBO token — " +
+            $"actual alice auths: [{string.Join(", ", aliceAuths)}]");
+        bobAuths.Should().HaveCount(1,
+            "all bob-tagged calls must share exactly one OBO token — " +
+            $"actual bob auths: [{string.Join(", ", bobAuths)}]");
+        aliceAuths[0].Should().NotBe(bobAuths[0],
+            "alice and bob must NOT share an OBO token (C2 cross-user isolation)");
 
         await downstreamHost.StopAsync();
     }
@@ -141,7 +168,7 @@ public class TwoUserConcurrencyTests
     // ── recording downstream MCP server ──────────────────────────────────────
 
     private static async Task<IHost> BuildRecordingDownstreamAsync(
-        ConcurrentBag<(string Method, string? Auth)> bag)
+        ConcurrentBag<(string Method, string? Auth, string? RawBody)> bag)
     {
         var builder = new HostBuilder()
             .ConfigureWebHost(webHost =>
@@ -175,7 +202,9 @@ public class TwoUserConcurrencyTests
                 });
                 webHost.Configure(app =>
                 {
-                    // Recording middleware — runs before MapMcp.
+                    // Recording middleware — runs before MapMcp, capturing both
+                    // the Authorization header and the raw JSON-RPC body so that
+                    // the _session argument tag is available for assertion.
                     app.Use(async (ctx, next) =>
                     {
                         if (ctx.Request.Method == "POST")
@@ -184,22 +213,23 @@ public class TwoUserConcurrencyTests
                             var auth = ctx.Request.Headers["Authorization"].FirstOrDefault();
 
                             string method = "unknown";
+                            string? rawBody = null;
                             try
                             {
                                 ctx.Request.Body.Position = 0;
                                 using var rdr = new System.IO.StreamReader(
                                     ctx.Request.Body, Encoding.UTF8, leaveOpen: true);
-                                var body = await rdr.ReadToEndAsync();
+                                rawBody = await rdr.ReadToEndAsync();
                                 ctx.Request.Body.Position = 0;
 
-                                if      (body.Contains("\"tools/call\""))    method = "tools/call";
-                                else if (body.Contains("\"tools/list\""))    method = "tools/list";
-                                else if (body.Contains("\"initialize\""))    method = "initialize";
-                                else if (body.Contains("\"notifications\"")) method = "notification";
+                                if      (rawBody.Contains("\"tools/call\""))    method = "tools/call";
+                                else if (rawBody.Contains("\"tools/list\""))    method = "tools/list";
+                                else if (rawBody.Contains("\"initialize\""))    method = "initialize";
+                                else if (rawBody.Contains("\"notifications\"")) method = "notification";
                             }
                             catch { /* best-effort */ }
 
-                            bag.Add((method, auth));
+                            bag.Add((method, auth, rawBody));
                         }
                         await next();
                     });

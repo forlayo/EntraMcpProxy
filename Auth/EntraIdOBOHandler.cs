@@ -96,6 +96,25 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
     protected override async Task<HttpResponseMessage> SendAsync(
         HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        // Best-effort: MCP session termination sends DELETE with no user context
+        // (McpClient.DisposeAsync fires a DELETE outside any request scope).
+        // When neither a bearer token nor a usable discovery scope is available,
+        // skip auth attachment and let the downstream handle the unauthenticated
+        // DELETE rather than throwing OboExchangeException and polluting logs with
+        // spurious "shutdown failed" warnings on every clean client teardown.
+        if (request.Method == HttpMethod.Delete)
+        {
+            var incomingTokenDel = GetIncomingBearerToken();
+            if (string.IsNullOrEmpty(incomingTokenDel)
+                && (!DiscoveryContext.IsActive || string.IsNullOrWhiteSpace(_discoveryScope)))
+            {
+                _logger.LogDebug(
+                    "OBO: DELETE with no user context and no discovery scope — " +
+                    "forwarding without auth (MCP session termination)");
+                return await base.SendAsync(request, cancellationToken);
+            }
+        }
+
         var incomingToken = GetIncomingBearerToken();
         string token;
 
