@@ -249,6 +249,14 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Block A compat: MCP spec MUST — DNS rebinding defense (Origin header validation).
+// Exempt: /authorize, /token, /.well-known, /api/healthz (handled inside the middleware).
+app.UseMiddleware<OriginValidationMiddleware>();
+
+// Block A compat: first-integration observability — logs OAuth request shape when
+// ProxyOptions.LogOAuthRequests=true. Off by default; NEVER logs token values.
+app.UseMiddleware<OAuthRequestLoggingMiddleware>();
+
 // Health check — exempt from auth
 app.MapGet("/api/healthz", () => Results.Ok(new
 {
