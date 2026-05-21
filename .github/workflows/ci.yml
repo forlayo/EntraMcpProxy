@@ -42,9 +42,13 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: dotnet restore --locked-mode
-      - run: dotnet test EntraMcpProxy.E2ETests --configuration Release --logger trx
-        # TODO: Remove continue-on-error once the E2E project exists (Task 1.5)
-        continue-on-error: true  # E2E project doesn't exist yet — created in Task 1.5
+      - run: dotnet build --no-restore --configuration Release
+      - run: dotnet test EntraMcpProxy.E2ETests --no-build --configuration Release --logger trx --results-directory TestResults
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-results
+          path: TestResults
 
   sbom:
     runs-on: ubuntu-latest
