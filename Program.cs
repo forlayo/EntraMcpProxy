@@ -81,6 +81,7 @@ builder.Services.AddAuthorization();
 builder.Services.AddHttpContextAccessor();
 
 // --- Services ---
+builder.Services.AddSingleton<IPublicBaseUrlAccessor, PublicBaseUrlAccessor>();
 builder.Services.AddSingleton<ToolRegistry>();
 builder.Services.AddSingleton<DownstreamClientManager>();
 builder.Services.AddSingleton<ProxyToolHandler>();
@@ -157,11 +158,9 @@ app.MapGet("/api/healthz", () => Results.Ok(new
 
 // OAuth AS facade — Claude Web constructs {mcp_url}/authorize and {mcp_url}/token
 // directly when configured with client_id+secret, so the proxy must expose these.
-app.MapGet("/.well-known/openid-configuration", (HttpContext context) =>
+app.MapGet("/.well-known/openid-configuration", (IPublicBaseUrlAccessor accessor) =>
 {
-    var scheme = context.Request.Scheme;
-    var host = context.Request.Host;
-    var baseUrl = $"{scheme}://{host}";
+    var baseUrl = accessor.Get();
     return Results.Json(new
     {
         issuer = baseUrl,
@@ -210,12 +209,9 @@ app.MapPost("/token", async (HttpContext context) =>
 });
 
 // RFC 9728 — Protected Resource Metadata
-app.MapGet("/.well-known/oauth-protected-resource", (HttpContext context) =>
+app.MapGet("/.well-known/oauth-protected-resource", (IPublicBaseUrlAccessor accessor) =>
 {
-    var scheme = context.Request.Scheme;
-    var host = context.Request.Host;
-    var baseUrl = $"{scheme}://{host}";
-
+    var baseUrl = accessor.Get();
     return Results.Json(new
     {
         resource = $"api://{entraClientId}",
@@ -226,6 +222,9 @@ app.MapGet("/.well-known/oauth-protected-resource", (HttpContext context) =>
 });
 
 // Auth middleware for MCP endpoints — all routes except the public ones require a valid bearer token.
+// Resolve the accessor once at registration time (it is a singleton backed by IOptions<ProxyOptions>).
+var publicBaseUrl = app.Services.GetRequiredService<IPublicBaseUrlAccessor>();
+
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/api/healthz") ||
@@ -240,11 +239,9 @@ app.Use(async (context, next) =>
     // Require authenticated user — return RFC 9728 compliant 401
     if (context.User.Identity?.IsAuthenticated != true)
     {
-        var scheme = context.Request.Scheme;
-        var host = context.Request.Host;
         context.Response.StatusCode = 401;
         context.Response.Headers["WWW-Authenticate"] =
-            $"Bearer resource_metadata=\"{scheme}://{host}/.well-known/oauth-protected-resource\"";
+            $"Bearer resource_metadata=\"{publicBaseUrl.Get()}/.well-known/oauth-protected-resource\"";
         return;
     }
 
