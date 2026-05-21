@@ -19,6 +19,8 @@
     <PackageVersion Include="NSubstitute" Version="5.3.0" />
     <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.0" />
     <PackageVersion Include="WireMock.Net" Version="1.6.7" />
+    <!-- Transitive pin: WireMock.Net pulls System.Linq.Dynamic.Core; pin to 1.7.2 to close
+         GHSA-4cv2-4hjh-77rx (HIGH). Remove when WireMock.Net ships with this version or newer. -->
     <PackageVersion Include="System.Linq.Dynamic.Core" Version="1.7.2" />
     <PackageVersion Include="Testcontainers" Version="4.0.0" />
     <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.2.0" />

@@ -815,6 +815,8 @@ public async Task Discovery_endpoint_ignores_XForwardedHost()
 
 **Goal:** Token validation is explicit and any future maintainer breaking it triggers a test failure. **Refs: N13, N14, L17.**
 
+> **Prerequisite (raised during Task 1.3 review)**: The current `Program.cs` does not set `MapInboundClaims = false`. The default `JwtSecurityTokenHandler` rewrites `oid` → `http://schemas.microsoft.com/identity/claims/objectidentifier` and `tid` → `http://schemas.microsoft.com/identity/claims/tenantid`. Phase 7's OBO cache key derives from `oid` and `tid` by short name and will silently read `null` if this is not corrected here. **Task 6.1 must explicitly set `MapInboundClaims = false` on the JWT bearer options** (or migrate to `JsonWebTokenHandler` which doesn't map claims by default) before any later phase reads claims by short name.
+
 ### Task 6.1: Explicit validation parameters
 
 **Files:** Modify `Program.cs`
