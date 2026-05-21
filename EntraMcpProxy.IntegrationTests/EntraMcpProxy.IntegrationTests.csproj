@@ -12,6 +12,7 @@
     <PackageReference Include="FluentAssertions" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" />
+    <PackageReference Include="WireMock.Net" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\EntraMcpProxy.csproj" />
