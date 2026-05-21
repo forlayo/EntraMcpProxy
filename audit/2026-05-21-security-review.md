@@ -848,3 +848,39 @@ Before tagging this branch for deployment, the operator must:
 ---
 
 **End of audit closure.**
+
+---
+
+## Post-Audit Additions — Blocks A/B/C/D (Production-Grade Layer)
+
+These blocks add the observability + operational + validation work
+needed for production deployment. None close audit findings (all
+findings were closed in Phases 0-17); these address production
+readiness gaps identified during the "are we ready for production?"
+discussion.
+
+| Block | Commit(s) | Concern addressed |
+|---|---|---|
+| A | 6a5c9bd | Origin header validation (MCP spec MUST), OAuth request logging for first-integration observability, configurable provenance markers |
+| B | 56c47a0 | /metrics Prometheus, /api/readyz health checks, OpenTelemetry tracing, Polly circuit breaker + retry, graceful shutdown |
+| C | c7c81ca | docs/sandbox-validation.md, loadtests/ NBomber scenarios, monitoring/ Prometheus alerts + Grafana dashboard, docs/compliance/ SOX + vendor-risk templates, docs/incident-runbooks/ |
+| D | [this commit] | docs/production-rollout-runbook.md, v0.2.0-prerelease tag |
+
+## Updated Production Readiness Verdict
+
+The branch is now READY for the operator-side production rollout
+described in `docs/production-rollout-runbook.md`. Final confidence
+breakdown:
+
+| Layer | Status |
+|---|---|
+| Audit findings closed in code (Phases 0-17) | ✅ |
+| Tests pass (211 unit / 50 integration / 2 E2E) | ✅ |
+| MCP spec MUST compliance (Origin validation added) | ✅ |
+| Observability fabric (/metrics + traces + readyz) | ✅ |
+| Resilience fabric (circuit breaker + retry + graceful shutdown) | ✅ |
+| Documentation (operations + threat model + sandbox + runbooks) | ✅ |
+| Sandbox validation against real Entra + real claude.ai | ⏳ Phase 1 of rollout runbook |
+| Third-party security review | ⏳ Phase 2 of rollout runbook |
+| Penetration test | ⏳ Phase 5 of rollout runbook |
+| Phased rollout | ⏳ Phases 6-8 of rollout runbook |
