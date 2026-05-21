@@ -7,6 +7,14 @@
     <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
   </PropertyGroup>
 
+  <!-- Exclude nested test project from main project compilation -->
+  <ItemGroup>
+    <Compile Remove="EntraMcpProxy.Tests\**" />
+    <Content Remove="EntraMcpProxy.Tests\**" />
+    <EmbeddedResource Remove="EntraMcpProxy.Tests\**" />
+    <None Remove="EntraMcpProxy.Tests\**" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
