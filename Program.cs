@@ -111,7 +111,19 @@ builder.Services.AddMcpServer(options =>
 
 builder.Services.AddCors(options =>
     options.AddDefaultPolicy(policy =>
-        policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod()));
+    {
+        var origins = builder.Configuration.GetSection("Proxy:AllowedCorsOrigins").Get<string[]>()
+                      ?? System.Array.Empty<string>();
+        if (origins.Length > 0)
+        {
+            policy.WithOrigins(origins)
+                  .AllowAnyHeader()
+                  .AllowAnyMethod();
+        }
+        // If empty: do not call WithOrigins — the policy is effectively closed.
+        // (ASP.NET Core CORS middleware will not emit Access-Control-Allow-Origin
+        // when no origins are configured for the request.)
+    }));
 
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
