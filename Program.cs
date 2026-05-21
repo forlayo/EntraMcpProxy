@@ -13,6 +13,7 @@
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.Options;
 using EntraMcpProxy.Auth;
 using EntraMcpProxy.Configuration;
 using EntraMcpProxy.Infrastructure;
@@ -20,14 +21,40 @@ using EntraMcpProxy.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// --- Configuration binding + startup validation ---
+//
+// All three Options types are registered with ValidateOnStart so any
+// misconfiguration fails the host build before the first request arrives
+// (OptionsValidationException is thrown during IHost.StartAsync which
+// WebApplicationFactory runs as part of CreateClient / server startup).
+// Validators are registered as singletons so IOptions<T> resolution
+// triggers them.
+
+builder.Services.AddOptions<EntraIdOptions>()
+    .Bind(builder.Configuration.GetSection("EntraId"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<EntraIdOptions>, EntraIdOptionsValidator>();
+
+builder.Services.AddOptions<ProxyOptions>()
+    .Bind(builder.Configuration.GetSection("Proxy"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<ProxyOptions>, ProxyOptionsValidator>();
+
+builder.Services.AddOptions<List<DownstreamServerOptions>>()
+    .Bind(builder.Configuration.GetSection("DownstreamServers"))
+    .ValidateOnStart();
+builder.Services.AddSingleton<IValidateOptions<List<DownstreamServerOptions>>, DownstreamServerOptionsValidator>();
+
+// Pull the raw config values needed for the existing code paths below
+// (authority, client-id, tenant-id).  Using builder.Configuration[...] here
+// is intentional — these values are already validated by the Options layer
+// above, so the only path where they are empty is a misconfiguration that
+// ValidateOnStart will catch before any request is processed.
+var entraAuthority = builder.Configuration["EntraId:Authority"] ?? "";
+var entraClientId  = builder.Configuration["EntraId:ClientId"]  ?? "";
+var entraTenantId  = builder.Configuration["EntraId:TenantId"]  ?? "";
+
 // --- Authentication (Entra ID JWT — required) ---
-var entraAuthority = builder.Configuration["EntraId:Authority"]
-    ?? throw new InvalidOperationException("EntraId:Authority is required.");
-var entraClientId = builder.Configuration["EntraId:ClientId"]
-    ?? throw new InvalidOperationException("EntraId:ClientId is required.");
-var entraTenantId = builder.Configuration["EntraId:TenantId"]
-    ?? entraAuthority.Split('/').FirstOrDefault(s => s.Length == 36 && s.Contains('-'))
-    ?? throw new InvalidOperationException("EntraId:TenantId could not be resolved from Authority.");
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -52,10 +79,6 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 
 builder.Services.AddHttpContextAccessor();
-
-// --- Downstream configuration ---
-builder.Services.Configure<List<DownstreamServerOptions>>(
-    builder.Configuration.GetSection("DownstreamServers"));
 
 // --- Services ---
 builder.Services.AddSingleton<ToolRegistry>();
@@ -92,6 +115,24 @@ builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
 var app = builder.Build();
+
+// --- Prod-config startup guard (finding N18) ---
+// Reject the dangerous combination of Production environment + disabled HTTPS
+// metadata validation.  The validators above accept RequireHttpsMetadata=false
+// as a valid value (it is needed for local dev/staging); this guard adds the
+// environment dimension that a pure IValidateOptions cannot see.
+// Placed after Build() so WebApplicationFactory test overrides (env, config)
+// are fully applied before the check runs.
+if (app.Environment.IsProduction())
+{
+    var entraId = app.Services.GetRequiredService<IOptions<EntraIdOptions>>().Value;
+    if (!entraId.RequireHttpsMetadata)
+    {
+        throw new InvalidOperationException(
+            "EntraId:RequireHttpsMetadata=false is not allowed in Production. " +
+            "Set it to true, or run with a non-Production ASPNETCORE_ENVIRONMENT.");
+    }
+}
 
 // Trust X-Forwarded-Proto/Host from ingress (e.g. AKS terminates TLS, forwards http internally)
 var forwardedOptions = new ForwardedHeadersOptions

@@ -97,12 +97,20 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
         _proxy = new ContainerBuilder()
             .WithImage(ProxyImage)
             .WithNetwork(_network)
-            .WithEnvironment("ASPNETCORE_ENVIRONMENT", "Production")
+            // Use E2ETest environment so the Production startup guard (finding N18)
+            // does not fire — E2E tests use a fake HTTP Entra that requires
+            // RequireHttpsMetadata=false for JWT bearer to accept the HTTP authority.
+            .WithEnvironment("ASPNETCORE_ENVIRONMENT", "E2ETest")
             .WithEnvironment("ASPNETCORE_URLS", "http://+:80")
             .WithEnvironment("EntraId__Authority", $"http://entra:8080/{FakeTenantId}/v2.0")
             .WithEnvironment("EntraId__TenantId",   FakeTenantId)
             .WithEnvironment("EntraId__ClientId",   FakeClientId)
             .WithEnvironment("EntraId__RequireHttpsMetadata", "false")
+            // ProxyOptions validator requires PublicBaseUrl (https), at least one
+            // AllowedRedirectUri, and at least one EgressAllowlist host.
+            .WithEnvironment("Proxy__PublicBaseUrl", "https://proxy.e2etest.local")
+            .WithEnvironment("Proxy__AllowedRedirectUris__0", "https://claude.ai/api/mcp/auth_callback")
+            .WithEnvironment("Proxy__EgressAllowlist__0", "downstream")
             .WithEnvironment("DownstreamServers__0__Name",    "fake-downstream")
             .WithEnvironment("DownstreamServers__0__Prefix",  "fake")
             .WithEnvironment("DownstreamServers__0__BaseUrl", "http://downstream:8080")

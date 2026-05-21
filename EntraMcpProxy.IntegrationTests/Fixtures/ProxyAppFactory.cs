@@ -25,6 +25,13 @@ public class ProxyAppFactory : WebApplicationFactory<Program>
         builder.UseEnvironment("IntegrationTest");
         builder.ConfigureAppConfiguration((_, cfg) =>
         {
+            // Clear ALL config sources inherited from the real app
+            // (appsettings.json, appsettings.Production.json, env vars, etc.)
+            // so that test configuration is fully hermetic — no stale
+            // downstream-server or entra placeholders from the checked-in
+            // appsettings.json can pollute the test run.
+            cfg.Sources.Clear();
+
             cfg.AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["EntraId:Authority"]            = EntraAuthority,
@@ -32,6 +39,13 @@ public class ProxyAppFactory : WebApplicationFactory<Program>
                 ["EntraId:ClientId"]             = ClientId,
                 ["EntraId:RequireHttpsMetadata"] = RequireHttps ? "true" : "false",
                 ["Proxy:PublicBaseUrl"]          = PublicBaseUrl,
+                ["Proxy:AllowedRedirectUris:0"]  = "https://claude.ai/api/mcp/auth_callback",
+                ["Proxy:EgressAllowlist:0"]      = "downstream.test",
+                ["Proxy:RefreshIntervalMinutes"] = "5",
+                ["Proxy:RateLimit:RequestsPerMinute"] = "30",
+                ["Proxy:ToolResult:MaxBytes"]    = "262144",
+                // DownstreamServers is intentionally omitted: empty list = no downstream
+                // servers, which is valid (the validator accepts an empty list).
             });
         });
     }
