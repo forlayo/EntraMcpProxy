@@ -131,6 +131,7 @@ builder.Services.AddSingleton<ToolRegistry>();
 builder.Services.AddSingleton<ToolPolicyService>();
 builder.Services.AddSingleton<DownstreamClientManager>();
 builder.Services.AddSingleton<ToolResultWrapper>();
+builder.Services.AddSingleton<DownstreamAuthorizationFilter>();
 builder.Services.AddSingleton<ProxyToolHandler>();
 builder.Services.AddHostedService<ToolAggregatorService>();
 

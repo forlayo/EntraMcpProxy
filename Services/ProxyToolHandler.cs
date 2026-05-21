@@ -1,4 +1,8 @@
+using System.Linq;
+using System.Security.Claims;
+using EntraMcpProxy.Auth;
 using EntraMcpProxy.Configuration;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
@@ -11,17 +15,23 @@ public class ProxyToolHandler
     private readonly ToolRegistry _toolRegistry;
     private readonly DownstreamClientManager _clientManager;
     private readonly ToolResultWrapper _wrapper;
+    private readonly DownstreamAuthorizationFilter _authz;
+    private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger<ProxyToolHandler> _logger;
 
     public ProxyToolHandler(
         ToolRegistry toolRegistry,
         DownstreamClientManager clientManager,
         ToolResultWrapper wrapper,
+        DownstreamAuthorizationFilter authz,
+        IHttpContextAccessor httpContextAccessor,
         ILogger<ProxyToolHandler> logger)
     {
         _toolRegistry = toolRegistry;
         _clientManager = clientManager;
         _wrapper = wrapper;
+        _authz = authz;
+        _httpContextAccessor = httpContextAccessor;
         _logger = logger;
     }
 
@@ -29,9 +39,14 @@ public class ProxyToolHandler
         RequestContext<ListToolsRequestParams> request,
         CancellationToken cancellationToken)
     {
-        var tools = _toolRegistry.GetAllTools();
-        _logger.LogDebug("ListTools returning {Count} aggregated tools", tools.Count);
-        return new ValueTask<ListToolsResult>(new ListToolsResult { Tools = tools.ToList() });
+        var user = _httpContextAccessor.HttpContext?.User
+            ?? new ClaimsPrincipal(new ClaimsIdentity());
+
+        var allTools = _toolRegistry.GetAllTools();
+        var visible = allTools.Where(t => _authz.IsAllowed(user, t.Name)).ToList();
+
+        _logger.LogDebug("ListTools: {Total} tools total, {Visible} visible to user", allTools.Count, visible.Count);
+        return new ValueTask<ListToolsResult>(new ListToolsResult { Tools = visible });
     }
 
     public async ValueTask<CallToolResult> HandleCallToolAsync(
@@ -40,6 +55,15 @@ public class ProxyToolHandler
     {
         var toolName = request.Params?.Name
             ?? throw new McpException("Tool name is required");
+
+        var user = _httpContextAccessor.HttpContext?.User
+            ?? new ClaimsPrincipal(new ClaimsIdentity());
+
+        if (!_authz.IsAllowed(user, toolName))
+        {
+            _logger.LogWarning("Authorization denied: user attempted to call '{Tool}' without permission", toolName);
+            throw new McpException($"Not authorized to call tool '{toolName}'");
+        }
 
         var entry = _toolRegistry.TryResolve(toolName);
         if (entry is null)

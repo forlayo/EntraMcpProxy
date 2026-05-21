@@ -29,8 +29,9 @@ public sealed record ProxyOptions
 
     public int RefreshIntervalMinutes { get; init; } = 5;
 
-    public RateLimitOptions  RateLimit  { get; init; } = new();
-    public ToolResultOptions ToolResult { get; init; } = new();
+    public RateLimitOptions          RateLimit      { get; init; } = new();
+    public ToolResultOptions         ToolResult     { get; init; } = new();
+    public AuthorizationPolicyOptions Authorization { get; init; } = new();
 
     public sealed record RateLimitOptions
     {
