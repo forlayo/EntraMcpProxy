@@ -1,3 +1,5 @@
+using EntraMcpProxy.Auth;
+
 namespace EntraMcpProxy.Services;
 
 public class ToolAggregatorService : BackgroundService
@@ -21,9 +23,16 @@ public class ToolAggregatorService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Initial connection and discovery
-        await _clientManager.ConnectAllAsync(stoppingToken);
-        await DiscoverToolsAsync(stoppingToken);
+        // Initial connection and discovery.
+        // DiscoveryContext.Enter() opts this call chain into the SP (client_credentials)
+        // fallback inside EntraIdOBOHandler, replacing the previous silent fallback
+        // (audit finding H6). Without this scope, OBO-configured downstreams would
+        // throw OboExchangeException during startup because no user principal exists.
+        using (DiscoveryContext.Enter())
+        {
+            await _clientManager.ConnectAllAsync(stoppingToken);
+            await DiscoverToolsAsync(stoppingToken);
+        }
 
         var intervalMinutes = _configuration.GetValue("Proxy:RefreshIntervalMinutes", 5);
         var interval = TimeSpan.FromMinutes(intervalMinutes);
@@ -33,7 +42,11 @@ public class ToolAggregatorService : BackgroundService
         using var timer = new PeriodicTimer(interval);
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
-            await DiscoverToolsAsync(stoppingToken);
+            // Each periodic refresh also runs in discovery scope.
+            using (DiscoveryContext.Enter())
+            {
+                await DiscoverToolsAsync(stoppingToken);
+            }
         }
     }
 
