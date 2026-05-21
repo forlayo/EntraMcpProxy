@@ -32,6 +32,25 @@
           "Microsoft.TestPlatform.TestHost": "17.11.1"
         }
       },
+      "ModelContextProtocol": {
+        "type": "Direct",
+        "requested": "[0.7.0-preview.1, )",
+        "resolved": "0.7.0-preview.1",
+        "contentHash": "3Ynk2yAVfZvVXMPGnzIjme8u3FNr/zVItmNH23LWcXiLuSXWqLG8ZSvPqajPxZ4Zjy0kEwQK6DUQwerJiSYfMg==",
+        "dependencies": {
+          "Microsoft.Extensions.Hosting.Abstractions": "10.0.2",
+          "ModelContextProtocol.Core": "0.7.0-preview.1"
+        }
+      },
+      "ModelContextProtocol.AspNetCore": {
+        "type": "Direct",
+        "requested": "[0.7.0-preview.1, )",
+        "resolved": "0.7.0-preview.1",
+        "contentHash": "MjVrg7WKKHWdJ2KX8bxxBncxoniI4nDoE68eudhpNGbJfDw/qHyXuZVMcL59wKMdDhmkf4qfWaG1QQ3cmTTIgQ==",
+        "dependencies": {
+          "ModelContextProtocol": "0.7.0-preview.1"
+        }
+      },
       "System.IdentityModel.Tokens.Jwt": {
         "type": "Direct",
         "requested": "[8.2.0, )",
@@ -1394,25 +1413,6 @@
         "dependencies": {
           "Microsoft.IdentityModel.Protocols": "8.2.0",
           "System.IdentityModel.Tokens.Jwt": "8.2.0"
-        }
-      },
-      "ModelContextProtocol": {
-        "type": "CentralTransitive",
-        "requested": "[0.7.0-preview.1, )",
-        "resolved": "0.7.0-preview.1",
-        "contentHash": "3Ynk2yAVfZvVXMPGnzIjme8u3FNr/zVItmNH23LWcXiLuSXWqLG8ZSvPqajPxZ4Zjy0kEwQK6DUQwerJiSYfMg==",
-        "dependencies": {
-          "Microsoft.Extensions.Hosting.Abstractions": "10.0.2",
-          "ModelContextProtocol.Core": "0.7.0-preview.1"
-        }
-      },
-      "ModelContextProtocol.AspNetCore": {
-        "type": "CentralTransitive",
-        "requested": "[0.7.0-preview.1, )",
-        "resolved": "0.7.0-preview.1",
-        "contentHash": "MjVrg7WKKHWdJ2KX8bxxBncxoniI4nDoE68eudhpNGbJfDw/qHyXuZVMcL59wKMdDhmkf4qfWaG1QQ3cmTTIgQ==",
-        "dependencies": {
-          "ModelContextProtocol": "0.7.0-preview.1"
         }
       },
       "System.Linq.Dynamic.Core": {

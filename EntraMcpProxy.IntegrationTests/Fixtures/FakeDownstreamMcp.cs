@@ -186,7 +186,14 @@ public sealed class FakeDownstreamMcp : IAsyncDisposable
         }
     }
 
-    private static string? TryExtractId(string? body)
+    /// <summary>
+    /// Extracts the JSON-RPC request ID, preserving its type.
+    /// Returns <c>long</c> for numeric IDs, <c>string</c> for string IDs, and
+    /// <c>null</c> for missing/null IDs.  Returning the correct runtime type is
+    /// important so that the WireMock response body serialises the id field with
+    /// the same JSON type the client sent (e.g. number 1, not string "1").
+    /// </summary>
+    private static object? TryExtractId(string? body)
     {
         if (string.IsNullOrEmpty(body)) return null;
         try
@@ -196,8 +203,8 @@ public sealed class FakeDownstreamMcp : IAsyncDisposable
             {
                 return idEl.ValueKind switch
                 {
-                    System.Text.Json.JsonValueKind.Number => idEl.GetRawText(),
-                    System.Text.Json.JsonValueKind.String => idEl.GetString(),
+                    System.Text.Json.JsonValueKind.Number => idEl.GetInt64(),
+                    System.Text.Json.JsonValueKind.String => (object?)idEl.GetString(),
                     _                                     => null,
                 };
             }

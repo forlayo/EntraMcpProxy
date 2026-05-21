@@ -519,7 +519,7 @@ Run + commit: `test: add E2E test project with Testcontainers`
 
 **Files:** Create `EntraMcpProxy.IntegrationTests/SdkTransportProbeTests.cs`
 
-- [ ] **Step 1: Test**
+- [x] **Step 1: Test**
 
 ```csharp
 [Fact]
@@ -544,7 +544,7 @@ public async Task McpClient_reauthorizes_per_tool_call()
 }
 ```
 
-- [ ] **Step 2: Run + capture result**
+- [x] **Step 2: Run + capture result**
 
 Two outcomes drive Phase 8:
 - **PASS:** SDK re-attaches per request → Phase 8 keeps singleton `McpClient` per downstream, removes SP fallback, ensures `IHttpContextAccessor` flows correctly.
@@ -552,9 +552,9 @@ Two outcomes drive Phase 8:
 
 Record the outcome in a comment at the top of `Services/DownstreamClientManager.cs` and in this plan as a checkbox below.
 
-- [ ] **Step 3: Result captured**
+- [x] **Step 3: Result captured**
 
-- [ ] Per-request semantics confirmed
+- [x] Per-request semantics confirmed
 - [ ] Per-session semantics confirmed (per-user client lifecycle required)
 
 Commit: `test: SDK transport semantics probe (Refs: C2 decision input)`
