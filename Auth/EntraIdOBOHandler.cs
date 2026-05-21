@@ -35,6 +35,8 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
     private readonly string _clientId;
     private readonly string _clientSecret;
     private readonly string _targetScope;
+    private readonly string? _discoveryScope;
+    private readonly string _tokenEndpointBaseUrl;
     private readonly ILogger<EntraIdOBOHandler> _logger;
 
     // C1: cache keyed on validated-claim composite, not raw token hash.
@@ -70,7 +72,9 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
         string targetScope,
         ILogger<EntraIdOBOHandler> logger,
         HttpMessageHandler? tokenHandler = null,
-        HttpMessageHandler? innerHandler = null)
+        HttpMessageHandler? innerHandler = null,
+        string? discoveryScope = null,
+        string? tokenEndpointBaseUrl = null)
         : base(innerHandler ?? new HttpClientHandler())
     {
         _httpContextAccessor = httpContextAccessor;
@@ -78,6 +82,10 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
         _clientId = clientId;
         _clientSecret = clientSecret;
         _targetScope = targetScope;
+        _discoveryScope = discoveryScope;
+        _tokenEndpointBaseUrl = string.IsNullOrWhiteSpace(tokenEndpointBaseUrl)
+            ? "https://login.microsoftonline.com"
+            : tokenEndpointBaseUrl.TrimEnd('/');
         _logger = logger;
         _tokenClient = new HttpClient(tokenHandler ?? new HttpClientHandler());
 
@@ -171,7 +179,7 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
         _logger.LogInformation("OBO: exchanging token for scope '{Scope}' key={Key}",
             _targetScope, cacheKey);
 
-        var tokenEndpoint = $"https://login.microsoftonline.com/{_tenantId}/oauth2/v2.0/token";
+        var tokenEndpoint = $"{_tokenEndpointBaseUrl}/{_tenantId}/oauth2/v2.0/token";
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
             ["grant_type"] = "urn:ietf:params:oauth:grant-type:jwt-bearer",
@@ -213,23 +221,29 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
                 return sp2.Token;
             }
 
+            // N3: DiscoveryScope must be explicitly configured — null disables SP fallback.
+            // The previous implementation used "{resource-id}/.default" which returns every
+            // application permission consented on the SP. Too broad for a discovery-only path.
+            if (string.IsNullOrWhiteSpace(_discoveryScope))
+            {
+                throw new OboExchangeException(
+                    "Discovery SP path invoked but OBO:DiscoveryScope is not configured. " +
+                    "Set DiscoveryScope to enable SP-token discovery, or disable downstream " +
+                    "tool discovery in configuration.");
+            }
+
             _logger.LogInformation(
                 "OBO: discovery path — acquiring SP token (client_credentials) for scope '{Scope}'",
-                _targetScope);
+                _discoveryScope);
 
-            var tokenEndpoint = $"https://login.microsoftonline.com/{_tenantId}/oauth2/v2.0/token";
-
-            // client_credentials uses resource/.default, not the delegated scope.
-            var resourceId = _targetScope.Contains('/')
-                ? _targetScope[.._targetScope.IndexOf('/')]
-                : _targetScope;
+            var tokenEndpoint = $"{_tokenEndpointBaseUrl}/{_tenantId}/oauth2/v2.0/token";
 
             var content = new FormUrlEncodedContent(new Dictionary<string, string>
             {
                 ["grant_type"] = "client_credentials",
                 ["client_id"] = _clientId,
                 ["client_secret"] = _clientSecret,
-                ["scope"] = $"{resourceId}/.default",
+                ["scope"] = _discoveryScope,
             });
 
             var (token, expiresIn) = await PostTokenAsync(tokenEndpoint, content, cancellationToken);

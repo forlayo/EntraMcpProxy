@@ -42,6 +42,25 @@ public sealed record DownstreamServerOptions
         public string ClientId     { get; init; } = "";
         public string ClientSecret { get; init; } = "";
         public string TargetScope  { get; init; } = "";
+        /// <summary>
+        /// Optional explicit scope used by the SP fallback (client_credentials flow)
+        /// for tool DISCOVERY only. Must be a fully-qualified scope like
+        /// "{resource-id}/Discovery.Tools". Leaving this null DISABLES the SP fallback
+        /// — discovery then must run with user context (e.g., from a first user request).
+        ///
+        /// Finding N3: the previous implementation used "{resource-id}/.default" which
+        /// returns every application permission consented on the SP. That is too broad
+        /// for a discovery-only path. DiscoveryScope makes the intent explicit and
+        /// minimum-privilege.
+        /// </summary>
+        public string? DiscoveryScope { get; init; }
+
+        /// <summary>
+        /// Optional override for the Entra token endpoint base URL.
+        /// Defaults to https://login.microsoftonline.com in production.
+        /// Set to a FakeEntra URL in integration tests to redirect OBO exchanges.
+        /// </summary>
+        public string? TokenEndpointBaseUrl { get; init; }
     }
 }
 
@@ -163,6 +182,8 @@ public sealed class DownstreamServerOptionsValidator
             errors.Add($"{prefix}:OBO:ClientSecret is required.");
         if (string.IsNullOrWhiteSpace(obo.TargetScope) || !obo.TargetScope.Contains('/'))
             errors.Add($"{prefix}:OBO:TargetScope must match '{{resource-id}}/{{scope}}'.");
+        if (!string.IsNullOrWhiteSpace(obo.DiscoveryScope) && !obo.DiscoveryScope.Contains('/'))
+            errors.Add($"{prefix}:OBO:DiscoveryScope, if set, must match '{{resource-id}}/{{scope}}'.");
     }
 
     private static void ValidateEntraIdConfig(string prefix, DownstreamServerOptions.EntraIdAuthOptions? entra, List<string> errors)

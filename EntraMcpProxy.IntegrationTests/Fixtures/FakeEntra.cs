@@ -148,6 +148,34 @@ public sealed class FakeEntra : IAsyncDisposable
                 }));
     }
 
+    /// <summary>
+    /// Replaces the default stub token endpoint with a dynamic handler that can
+    /// inspect the inbound form body (URL-encoded) and return a customised response.
+    ///
+    /// The <paramref name="responseFactory"/> receives the raw form body string and
+    /// must return a JSON-serialisable object (anonymous type is fine).
+    ///
+    /// Uses WireMock.Net 1.6.7's
+    /// <c>WithBodyAsJson(Func&lt;IRequestMessage, object&gt;)</c> which is the same
+    /// pattern <see cref="FakeDownstreamMcp"/> uses for its recording responses.
+    /// </summary>
+    public void RegisterTokenEndpointHandler(Func<string, object> responseFactory)
+    {
+        // Reset all existing mappings and re-establish the non-token ones.
+        _server.ResetMappings();
+        SetupOpenIdConfiguration();
+        SetupJwks();
+
+        _server
+            .Given(Request.Create()
+                .WithPath($"/{TenantId}/oauth2/v2.0/token")
+                .UsingPost())
+            .RespondWith(Response.Create()
+                .WithStatusCode(200)
+                .WithHeader("Content-Type", "application/json")
+                .WithBodyAsJson(req => responseFactory(req.Body ?? "")));
+    }
+
     public ValueTask DisposeAsync()
     {
         _server.Stop();

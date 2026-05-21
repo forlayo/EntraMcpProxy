@@ -10,9 +10,9 @@ public class DownstreamClientManager : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, McpClient> _clients = new();
     private readonly IReadOnlyList<DownstreamServerOptions> _configs;
-    private readonly ILoggerFactory _loggerFactory;
+    protected readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<DownstreamClientManager> _logger;
-    private readonly IHttpContextAccessor _httpContextAccessor;
+    protected readonly IHttpContextAccessor _httpContextAccessor;
 
     public DownstreamClientManager(
         IOptions<List<DownstreamServerOptions>> configs,
@@ -87,7 +87,7 @@ public class DownstreamClientManager : IAsyncDisposable
         return client;
     }
 
-    private HttpClient CreateHttpClient(DownstreamServerOptions config)
+    protected virtual HttpClient CreateHttpClient(DownstreamServerOptions config)
     {
         if (string.Equals(config.AuthType, "EntraId", StringComparison.OrdinalIgnoreCase))
         {
@@ -114,7 +114,9 @@ public class DownstreamClientManager : IAsyncDisposable
             var handler = new EntraIdOBOHandler(
                 _httpContextAccessor,
                 obo.TenantId, obo.ClientId, obo.ClientSecret, obo.TargetScope,
-                oboLogger);
+                oboLogger,
+                discoveryScope: obo.DiscoveryScope,
+                tokenEndpointBaseUrl: obo.TokenEndpointBaseUrl);
 
             return new HttpClient(handler, disposeHandler: true)
             {

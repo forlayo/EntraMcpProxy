@@ -59,7 +59,8 @@ public class EntraIdOBOHandlerTests
     /// The <paramref name="fakeToken"/> intercepts calls to the Entra token endpoint.
     /// </summary>
     private static (EntraIdOBOHandler handler, FakeDownstreamHandler downstream)
-        BuildPipeline(IHttpContextAccessor accessor, FakeTokenHandler fakeToken)
+        BuildPipeline(IHttpContextAccessor accessor, FakeTokenHandler fakeToken,
+            string? discoveryScope = null)
     {
         var downstream = new FakeDownstreamHandler();
         var handler = new EntraIdOBOHandler(
@@ -70,7 +71,8 @@ public class EntraIdOBOHandlerTests
             targetScope: "api://resource/scope",
             logger: NullLogger<EntraIdOBOHandler>.Instance,
             tokenHandler: fakeToken,
-            innerHandler: downstream);
+            innerHandler: downstream,
+            discoveryScope: discoveryScope);
         return (handler, downstream);
     }
 
@@ -220,13 +222,14 @@ public class EntraIdOBOHandlerTests
     }
 
     [Fact]
-    public async Task With_DiscoveryContext_Enter_uses_SP_token()
+    public async Task With_DiscoveryContext_Enter_uses_SP_token_with_explicit_DiscoveryScope()
     {
         var tokenFake = new FakeTokenHandler();
         tokenFake.SetResponse("sp-discovery-token", expiresIn: 600);
 
         var accessor = EmptyAccessor();             // no user context
-        var (handler, downstream) = BuildPipeline(accessor, tokenFake);
+        var (handler, downstream) = BuildPipeline(accessor, tokenFake,
+            discoveryScope: "api://x/Discovery.Tools");
 
         using (DiscoveryContext.Enter())
         {
@@ -239,7 +242,38 @@ public class EntraIdOBOHandlerTests
         body.Should().Contain("client_credentials");
         body.Should().NotContain("jwt-bearer");
 
+        // N3: the scope sent to Entra must be the explicit DiscoveryScope, not /.default
+        body.Should().Contain("api%3A%2F%2Fx%2FDiscovery.Tools",
+            "scope field must be URL-encoded form of 'api://x/Discovery.Tools'");
+        body.Should().NotContain(".default",
+            "the previous {resource-id}/.default broadened scope must no longer be sent");
+
         downstream.LastAuthHeader.Should().Contain("sp-discovery-token");
+    }
+
+    [Fact]
+    public async Task Discovery_path_without_configured_DiscoveryScope_throws()
+    {
+        var tokenFake = new FakeTokenHandler();
+        tokenFake.SetResponse("should-not-be-used", expiresIn: 600);
+
+        var accessor = EmptyAccessor();             // no user context
+        // discoveryScope is null (omitted) — SP fallback is disabled
+        var (handler, _) = BuildPipeline(accessor, tokenFake, discoveryScope: null);
+
+        Func<Task> act = async () =>
+        {
+            using (DiscoveryContext.Enter())
+            {
+                await SendAsync(handler);
+            }
+        };
+
+        await act.Should().ThrowAsync<OboExchangeException>()
+            .WithMessage("*DiscoveryScope is not configured*");
+
+        // No token requests should have reached the endpoint
+        tokenFake.Received.Should().BeEmpty();
     }
 
     [Fact]

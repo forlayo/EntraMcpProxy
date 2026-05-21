@@ -214,4 +214,39 @@ public class DownstreamServerOptionsValidatorTests
         r.FailureMessage!.Should().Contain("Prefix");
         r.FailureMessage.Should().Contain("EgressAllowlist");
     }
+
+    // ── DiscoveryScope validator tests (N3) ─────────────────────────────────────
+
+    [Fact]
+    public void Accepts_OBO_server_with_valid_DiscoveryScope()
+    {
+        var s = OboServer() with
+        {
+            OBO = OboServer().OBO! with { DiscoveryScope = "api://fake-resource/Discovery.Tools" }
+        };
+        NewValidator().Validate(null, new() { s }).Succeeded.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Accepts_OBO_server_with_null_DiscoveryScope()
+    {
+        // null is the secure default — disables the SP fallback entirely
+        var s = OboServer() with
+        {
+            OBO = OboServer().OBO! with { DiscoveryScope = null }
+        };
+        NewValidator().Validate(null, new() { s }).Succeeded.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Rejects_OBO_server_with_DiscoveryScope_missing_slash()
+    {
+        var s = OboServer() with
+        {
+            OBO = OboServer().OBO! with { DiscoveryScope = "no-slash-here" }
+        };
+        var r = NewValidator().Validate(null, new() { s });
+        r.Failed.Should().BeTrue();
+        r.FailureMessage!.Should().Contain("DiscoveryScope");
+    }
 }
