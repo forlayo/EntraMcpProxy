@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using EntraMcpProxy.Infrastructure;
@@ -32,6 +33,7 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
 {
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly HttpClient _tokenClient;
+    private readonly IHttpClientFactory? _tokenClientFactory;
     private readonly string _tenantId;
     private readonly string _clientId;
     private readonly string _clientSecret;
@@ -74,6 +76,13 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
     ///   Leave <c>null</c> in unit tests that supply their own stubs.
     ///   N19 runtime defense-in-depth.
     /// </param>
+    /// <param name="tokenClientFactory">
+    ///   Optional <see cref="IHttpClientFactory"/> used in production to resolve
+    ///   the named client "entra-obo-token" (which has Polly resilience applied).
+    ///   When non-null AND <paramref name="tokenHandler"/> is null, the factory is
+    ///   used instead of a bare HttpClientHandler.  Unit tests supply
+    ///   <paramref name="tokenHandler"/> directly and leave this null.
+    /// </param>
     public EntraIdOBOHandler(
         IHttpContextAccessor httpContextAccessor,
         string tenantId,
@@ -86,7 +95,8 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
         string? discoveryScope = null,
         string? tokenEndpointBaseUrl = null,
         AuditLog? audit = null,
-        EgressEnforcingHandler? egressEnforcer = null)
+        EgressEnforcingHandler? egressEnforcer = null,
+        IHttpClientFactory? tokenClientFactory = null)
         : base(WrapEgress(innerHandler ?? new HttpClientHandler(), egressEnforcer))
     {
         _httpContextAccessor = httpContextAccessor;
@@ -100,7 +110,16 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
             : tokenEndpointBaseUrl.TrimEnd('/');
         _logger = logger;
         _audit = audit;
-        _tokenClient = new HttpClient(tokenHandler ?? new HttpClientHandler());
+
+        // Production path: use the named "entra-obo-token" client (Polly resilience).
+        // Test path: tokenHandler is supplied directly, so use a bare HttpClient wrapping it.
+        // Fallback (no factory, no handler): bare HttpClientHandler — should not happen in prod.
+        _tokenClientFactory = tokenClientFactory;
+        _tokenClient = tokenHandler is not null
+            ? new HttpClient(tokenHandler)
+            : tokenClientFactory is null
+                ? new HttpClient(new HttpClientHandler())
+                : tokenClientFactory.CreateClient("entra-obo-token");
 
         // M14: start background eviction loop.
         _ = Task.Run(EvictionLoopAsync);
@@ -211,6 +230,11 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
         _logger.LogInformation("OBO: exchanging token for scope '{Scope}' key={Key}",
             _targetScope, cacheKey);
 
+        // Block B: custom tracing span + Prometheus counter for OBO exchange.
+        using var activity = ProxyTelemetry.Source.StartActivity("EntraIdOBOHandler.Exchange");
+        activity?.SetTag("target_scope", _targetScope);
+        activity?.SetTag("cache_hit", false);
+
         var tokenEndpoint = $"{_tokenEndpointBaseUrl}/{_tenantId}/oauth2/v2.0/token";
         var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -222,16 +246,30 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
             ["requested_token_use"] = "on_behalf_of",
         });
 
-        var (accessToken, expiresIn) = await PostTokenAsync(tokenEndpoint, content, cancellationToken);
+        try
+        {
+            var (accessToken, expiresIn) = await PostTokenAsync(tokenEndpoint, content, cancellationToken);
 
-        // N2: cap TTL at MaxCacheTtl (10 min) regardless of Entra's expires_in.
-        var cappedTtl = TimeSpan.FromSeconds(Math.Min(expiresIn, (int)MaxCacheTtl.TotalSeconds));
-        var expires = DateTimeOffset.UtcNow.Add(cappedTtl);
-        _oboCache[cacheKey] = new CacheEntry(accessToken, expires);
+            // N2: cap TTL at MaxCacheTtl (10 min) regardless of Entra's expires_in.
+            var cappedTtl = TimeSpan.FromSeconds(Math.Min(expiresIn, (int)MaxCacheTtl.TotalSeconds));
+            var expires = DateTimeOffset.UtcNow.Add(cappedTtl);
+            _oboCache[cacheKey] = new CacheEntry(accessToken, expires);
+            ProxyMetrics.OboCacheSize.Set(_oboCache.Count);
 
-        _logger.LogDebug("OBO: token obtained, TTL={Ttl}s (capped from {Raw}s)",
-            (int)cappedTtl.TotalSeconds, expiresIn);
-        return accessToken;
+            _logger.LogDebug("OBO: token obtained, TTL={Ttl}s (capped from {Raw}s)",
+                (int)cappedTtl.TotalSeconds, expiresIn);
+
+            ProxyMetrics.OboExchanges.WithLabels("success").Inc();
+            activity?.SetTag("outcome", "success");
+            return accessToken;
+        }
+        catch
+        {
+            ProxyMetrics.OboExchanges.WithLabels("error").Inc();
+            activity?.SetTag("outcome", "error");
+            activity?.SetStatus(ActivityStatusCode.Error);
+            throw;
+        }
     }
 
     private async Task<string> GetSpTokenAsync(CancellationToken cancellationToken)
@@ -278,11 +316,22 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
                 ["scope"] = _discoveryScope,
             });
 
-            var (token, expiresIn) = await PostTokenAsync(tokenEndpoint, content, cancellationToken);
+            string token;
+            try
+            {
+                int expiresIn;
+                (token, expiresIn) = await PostTokenAsync(tokenEndpoint, content, cancellationToken);
 
-            // N2: also cap the SP token TTL.
-            var cappedTtl = TimeSpan.FromSeconds(Math.Min(expiresIn, (int)MaxCacheTtl.TotalSeconds));
-            _spTokenCache = (token, DateTimeOffset.UtcNow.Add(cappedTtl));
+                // N2: also cap the SP token TTL.
+                var cappedTtl = TimeSpan.FromSeconds(Math.Min(expiresIn, (int)MaxCacheTtl.TotalSeconds));
+                _spTokenCache = (token, DateTimeOffset.UtcNow.Add(cappedTtl));
+                ProxyMetrics.OboExchanges.WithLabels("success").Inc();
+            }
+            catch
+            {
+                ProxyMetrics.OboExchanges.WithLabels("error").Inc();
+                throw;
+            }
 
             return token;
         }
@@ -361,6 +410,8 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
             if (kvp.Value.Expires <= now)
                 _oboCache.TryRemove(kvp.Key, out _);
         }
+        // Block B: keep the cache-size gauge current after each eviction pass.
+        ProxyMetrics.OboCacheSize.Set(_oboCache.Count);
     }
 
     /// <summary>

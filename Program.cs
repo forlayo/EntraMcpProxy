@@ -14,9 +14,14 @@
 using System;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using Prometheus;
 using EntraMcpProxy.Auth;
 using EntraMcpProxy.Configuration;
 using EntraMcpProxy.Infrastructure;
@@ -182,13 +187,45 @@ builder.Services.AddTransient<EgressEnforcingHandler>();
 // N19: EgressEnforcingHandler is added here so the /token relay is also subject to
 // the allowlist check at send time (login.microsoftonline.com is always implicitly
 // permitted, so this does not break the normal OAuth flow).
+// Block B: AddStandardResilienceHandler adds 2-retry exponential backoff, 50% failure-ratio
+// circuit breaker (min 10 calls), 5s attempt timeout, 30s total timeout via Polly.
 builder.Services.AddHttpClient("entra-token-relay")
-    .AddHttpMessageHandler<EgressEnforcingHandler>();
+    .AddHttpMessageHandler<EgressEnforcingHandler>()
+    .AddStandardResilienceHandler(o =>
+    {
+        o.Retry.MaxRetryAttempts = 2;
+        o.Retry.BackoffType = Polly.DelayBackoffType.Exponential;
+        o.CircuitBreaker.FailureRatio = 0.5;
+        o.CircuitBreaker.MinimumThroughput = 10;
+        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(5);
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(30);
+    });
+
+// Block B: Named client used by EntraIdOBOHandler for OBO token exchanges.
+// Same resilience policy as entra-token-relay; no EgressEnforcingHandler here
+// because the OBO handler constructs its own pipeline (egress enforcement is
+// applied to the downstream DelegatingHandler chain, not the token endpoint call).
+builder.Services.AddHttpClient("entra-obo-token")
+    .AddStandardResilienceHandler(o =>
+    {
+        o.Retry.MaxRetryAttempts = 2;
+        o.Retry.BackoffType = Polly.DelayBackoffType.Exponential;
+        o.CircuitBreaker.FailureRatio = 0.5;
+        o.CircuitBreaker.MinimumThroughput = 10;
+        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(5);
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(30);
+    });
 
 // M10: Per-IP fixed-window rate limit on the OAuth facade endpoints.
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    // Block B: emit metric on every rate-limit rejection.
+    options.OnRejected = (ctx, _) =>
+    {
+        ProxyMetrics.OAuthRejections.WithLabels("rate_limit").Inc();
+        return ValueTask.CompletedTask;
+    };
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
     {
         // Only apply to /authorize and /token. Other paths get an unlimited bucket.
@@ -223,6 +260,31 @@ builder.Services.AddRateLimiter(options =>
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
+// ── Block B: Health checks ─────────────────────────────────────────────────
+// /api/healthz = liveness  (no probes — process-alive only)
+// /api/readyz  = readiness (tagged "ready" checks run here)
+builder.Services.AddHealthChecks()
+    .AddCheck<EntraConnectivityHealthCheck>("entra-oidc", tags: new[] { "ready" })
+    .AddCheck<DownstreamConnectivityHealthCheck>("downstream-mcp", tags: new[] { "ready" });
+
+// ── Block B: OpenTelemetry tracing ─────────────────────────────────────────
+// Exports if OTEL_EXPORTER_OTLP_ENDPOINT is set; silent otherwise.
+// Prometheus metrics use prometheus-net (/metrics); OTel handles tracing only.
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r.AddService("entra-mcp-proxy", serviceVersion: "1.0"))
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation()
+        .AddSource("EntraMcpProxy")
+        .AddOtlpExporter());
+
+// ── Block B: Graceful shutdown ─────────────────────────────────────────────
+// Explicit 30-second window so operators can tune via HostOptions if needed.
+builder.Services.Configure<HostOptions>(o =>
+{
+    o.ShutdownTimeout = TimeSpan.FromSeconds(30);
+});
+
 var app = builder.Build();
 
 // --- Prod-config startup guard (finding N18) ---
@@ -243,6 +305,10 @@ if (app.Environment.IsProduction())
     }
 }
 
+// Block B: Prometheus request-level metrics (rate, latency, status codes).
+// UseHttpMetrics must precede routing middleware.
+app.UseHttpMetrics();
+
 app.UseExceptionHandler();
 app.UseCors();
 app.UseRateLimiter();
@@ -257,12 +323,40 @@ app.UseMiddleware<OriginValidationMiddleware>();
 // ProxyOptions.LogOAuthRequests=true. Off by default; NEVER logs token values.
 app.UseMiddleware<OAuthRequestLoggingMiddleware>();
 
-// Health check — exempt from auth
-app.MapGet("/api/healthz", () => Results.Ok(new
+// Block B: Prometheus /metrics endpoint (text exposition format).
+// No auth on /metrics — scraping agents typically reach this from a private network.
+// Operators that need auth should front with an nginx sidecar or network policy.
+app.MapMetrics("/metrics");
+
+// Block B: Liveness — process alive (no upstream probes).
+// Returns 200 as long as the process is running.
+app.MapHealthChecks("/api/healthz", new HealthCheckOptions
 {
-    status = "Healthy",
-    timestamp = DateTime.UtcNow,
-}));
+    Predicate = _ => false,  // skip all checks; just 200 if the process is alive
+    ResultStatusCodes =
+    {
+        [HealthStatus.Healthy]   = StatusCodes.Status200OK,
+        [HealthStatus.Degraded]  = StatusCodes.Status200OK,
+        [HealthStatus.Unhealthy] = StatusCodes.Status200OK,
+    },
+    ResponseWriter = async (context, report) =>
+    {
+        context.Response.ContentType = "application/json";
+        await context.Response.WriteAsync(
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                status = "Healthy",
+                timestamp = DateTime.UtcNow,
+            }));
+    },
+});
+
+// Block B: Readiness — actual upstream probing.
+// Returns 200 only when all "ready" tagged checks pass.
+app.MapHealthChecks("/api/readyz", new HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready"),
+});
 
 // OAuth AS facade — Claude Web constructs {mcp_url}/authorize and {mcp_url}/token
 // directly when configured with client_id+secret, so the proxy must expose these.
@@ -292,6 +386,7 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
         audit.RedirectUriRejected(
             clientIp: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             rejectedUri: redirectUri);
+        ProxyMetrics.OAuthRejections.WithLabels("redirect_uri").Inc();
         return Results.BadRequest(new
         {
             error = "invalid_request",
@@ -309,6 +404,7 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
         audit.PkceMissing(
             clientIp: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             error: pkce.Error ?? "PKCE missing");
+        ProxyMetrics.OAuthRejections.WithLabels("pkce_missing").Inc();
         return Results.BadRequest(new
         {
             error = "invalid_request",
@@ -339,6 +435,7 @@ app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory
     const int MaxBodyBytes = 8 * 1024;
     if (context.Request.ContentLength is long len && len > MaxBodyBytes)
     {
+        ProxyMetrics.OAuthRejections.WithLabels("body_size").Inc();
         context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
         return;
     }
@@ -355,6 +452,7 @@ app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory
     }
     if (total > MaxBodyBytes)
     {
+        ProxyMetrics.OAuthRejections.WithLabels("body_size").Inc();
         context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
         return;
     }
@@ -394,6 +492,8 @@ var publicBaseUrl = app.Services.GetRequiredService<IPublicBaseUrlAccessor>();
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/api/healthz") ||
+        context.Request.Path.StartsWithSegments("/api/readyz") ||
+        context.Request.Path.StartsWithSegments("/metrics") ||
         context.Request.Path.StartsWithSegments("/.well-known") ||
         context.Request.Path.StartsWithSegments("/authorize") ||
         context.Request.Path.StartsWithSegments("/token"))
@@ -418,6 +518,20 @@ app.Use(async (context, next) =>
 // custom middleware. Defense in depth — if the middleware ordering or
 // path-exemption list ever changes, MCP routes stay protected.
 app.MapMcp().RequireAuthorization();
+
+// Block B: Graceful shutdown hooks — log drain window boundaries.
+// HostOptions.ShutdownTimeout (30s, set above) gives in-flight requests
+// time to complete before the host terminates.
+var lifetime = app.Services.GetRequiredService<IHostApplicationLifetime>();
+lifetime.ApplicationStopping.Register(() =>
+{
+    app.Logger.LogInformation("Shutdown initiated — draining in-flight requests (up to 30 s)");
+});
+lifetime.ApplicationStopped.Register(() =>
+{
+    app.Logger.LogInformation("Shutdown complete");
+});
+
 app.Run();
 
 // Marker for Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>.

@@ -399,7 +399,10 @@ public class TwoUserConcurrencyTests
             EntraMcpProxy.Infrastructure.AuditLog audit,
             IServiceProvider serviceProvider,
             TestServer testServer)
-            : base(configs, loggerFactory, httpContextAccessor, audit, serviceProvider)
+            // Block B: httpClientFactory=null! is safe here because CreateHttpClient is
+            // overridden below, so the base class factory field is never accessed.
+            : base(configs, loggerFactory, httpContextAccessor, audit, serviceProvider,
+                   httpClientFactory: null!)
         {
             _testServer = testServer;
         }

@@ -8,6 +8,7 @@ using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using Prometheus;
 
 namespace EntraMcpProxy.Services;
 
@@ -66,6 +67,7 @@ public class ProxyToolHandler
         if (!_authz.IsAllowed(user, toolName))
         {
             _audit.AuthzDenied(user, toolName, reason: "not in allowed groups");
+            ProxyMetrics.AuthzDenials.WithLabels(toolName).Inc();
             throw new McpException($"Not authorized to call tool '{toolName}'");
         }
 
@@ -84,6 +86,12 @@ public class ProxyToolHandler
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var correlationId = System.Guid.NewGuid().ToString();
 
+        // Block B: custom tracing span for tool call routing.
+        using var activity = ProxyTelemetry.Source.StartActivity("ProxyToolHandler.CallTool");
+        activity?.SetTag("tool", toolName);
+        activity?.SetTag("downstream", entry.Prefix);
+        activity?.SetTag("user_oid", user.FindFirst("oid")?.Value);
+
         var downstreamParams = new CallToolRequestParams
         {
             Name = entry.OriginalName,
@@ -95,13 +103,21 @@ public class ProxyToolHandler
             var result = await client.CallToolAsync(downstreamParams, cancellationToken);
             sw.Stop();
 
+            var status = result.IsError == true ? "error" : "success";
+            activity?.SetTag("status", status);
+
             _audit.ToolInvocation(
                 user,
                 tool: toolName,
                 args: request.Params?.Arguments,
-                status: result.IsError == true ? "error" : "success",
+                status: status,
                 latencyMs: sw.ElapsedMilliseconds,
                 correlationId: correlationId);
+
+            // Block B: emit Prometheus metrics.
+            ProxyMetrics.ToolInvocations.WithLabels(entry.Prefix, toolName, status).Inc();
+            ProxyMetrics.ToolLatency.WithLabels(entry.Prefix, toolName)
+                .Observe(sw.Elapsed.TotalSeconds);
 
             if (result.IsError == true)
             {
@@ -123,13 +139,22 @@ public class ProxyToolHandler
         catch (Exception ex)
         {
             sw.Stop();
+            const string exceptionStatus = "exception";
+            activity?.SetTag("status", exceptionStatus);
+            activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, ex.Message);
+
             _audit.ToolInvocation(
                 user,
                 tool: toolName,
                 args: request.Params?.Arguments,
-                status: "exception",
+                status: exceptionStatus,
                 latencyMs: sw.ElapsedMilliseconds,
                 correlationId: correlationId);
+
+            ProxyMetrics.ToolInvocations.WithLabels(entry.Prefix, toolName, exceptionStatus).Inc();
+            ProxyMetrics.ToolLatency.WithLabels(entry.Prefix, toolName)
+                .Observe(sw.Elapsed.TotalSeconds);
+
             _logger.LogError(ex,
                 "Downstream '{Prefix}':'{Tool}' threw exception",
                 entry.Prefix, entry.OriginalName);

@@ -17,13 +17,15 @@ public class DownstreamClientManager : IAsyncDisposable
     protected readonly IHttpContextAccessor _httpContextAccessor;
     private readonly AuditLog _audit;
     private readonly IServiceProvider _serviceProvider;
+    private readonly IHttpClientFactory _httpClientFactory;
 
     public DownstreamClientManager(
         IOptions<List<DownstreamServerOptions>> configs,
         ILoggerFactory loggerFactory,
         IHttpContextAccessor httpContextAccessor,
         AuditLog audit,
-        IServiceProvider serviceProvider)
+        IServiceProvider serviceProvider,
+        IHttpClientFactory httpClientFactory)
     {
         _configs = configs.Value.Where(c => c.Enabled && !string.IsNullOrWhiteSpace(c.BaseUrl)).ToList();
         _loggerFactory = loggerFactory;
@@ -31,6 +33,7 @@ public class DownstreamClientManager : IAsyncDisposable
         _httpContextAccessor = httpContextAccessor;
         _audit = audit;
         _serviceProvider = serviceProvider;
+        _httpClientFactory = httpClientFactory;
     }
 
     public async Task<McpClient?> GetOrCreateClientAsync(string prefix, CancellationToken cancellationToken = default)
@@ -65,7 +68,9 @@ public class DownstreamClientManager : IAsyncDisposable
     public McpClient? GetClient(string prefix) =>
         _clients.TryGetValue(prefix, out var client) ? client : null;
 
-    public IReadOnlyList<(string Prefix, McpClient Client)> GetAllClients() =>
+    // Virtual to allow test subclasses to simulate connection state without
+    // real McpClient instances (used by DownstreamConnectivityHealthCheck tests).
+    public virtual IReadOnlyList<(string Prefix, McpClient Client)> GetAllClients() =>
         _clients.Select(kvp => (kvp.Key, kvp.Value)).ToList();
 
     public IReadOnlyList<DownstreamServerOptions> GetConfigs() => _configs;
@@ -132,7 +137,8 @@ public class DownstreamClientManager : IAsyncDisposable
                 discoveryScope: obo.DiscoveryScope,
                 tokenEndpointBaseUrl: obo.TokenEndpointBaseUrl,
                 audit: _audit,
-                egressEnforcer: egressEnforcer);
+                egressEnforcer: egressEnforcer,
+                tokenClientFactory: _httpClientFactory);
 
             return new HttpClient(handler, disposeHandler: true)
             {
