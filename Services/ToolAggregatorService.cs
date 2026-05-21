@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using EntraMcpProxy.Auth;
 
 namespace EntraMcpProxy.Services;
@@ -6,17 +9,20 @@ public class ToolAggregatorService : BackgroundService
 {
     private readonly DownstreamClientManager _clientManager;
     private readonly ToolRegistry _toolRegistry;
+    private readonly ToolPolicyService _toolPolicy;
     private readonly IConfiguration _configuration;
     private readonly ILogger<ToolAggregatorService> _logger;
 
     public ToolAggregatorService(
         DownstreamClientManager clientManager,
         ToolRegistry toolRegistry,
+        ToolPolicyService toolPolicy,
         IConfiguration configuration,
         ILogger<ToolAggregatorService> logger)
     {
         _clientManager = clientManager;
         _toolRegistry = toolRegistry;
+        _toolPolicy = toolPolicy;
         _configuration = configuration;
         _logger = logger;
     }
@@ -63,12 +69,64 @@ public class ToolAggregatorService : BackgroundService
                 if (client is null) continue;
 
                 var tools = await client.ListToolsAsync(cancellationToken: cancellationToken);
-                var protocolTools = tools.Select(t => t.ProtocolTool).ToList();
-                _toolRegistry.RegisterTools(config.Prefix, protocolTools);
+
+                // N5: per-downstream allowlist filtering happens BEFORE policy is applied,
+                // so a rejected tool's description is never even computed.
+                var permitted = tools.Select(t => t.ProtocolTool).ToList();
+                if (config.AllowedTools is { Count: > 0 } allow)
+                {
+                    var allowSet = new HashSet<string>(allow, StringComparer.Ordinal);
+                    var rejected = permitted.Where(t => !allowSet.Contains(t.Name)).Select(t => t.Name).ToList();
+                    permitted = permitted.Where(t => allowSet.Contains(t.Name)).ToList();
+                    if (rejected.Count > 0)
+                    {
+                        _logger.LogWarning(
+                            "Rejecting {Count} unallowlisted tools from '{Name}': {Tools}",
+                            rejected.Count, config.Name, string.Join(", ", rejected));
+                    }
+                }
+
+                // N5: provenance + schema policy applied to each tool.
+                var sanitized = new List<ModelContextProtocol.Protocol.Tool>(permitted.Count);
+                foreach (var t in permitted)
+                {
+                    var policed = _toolPolicy.Apply(config.Prefix, t);
+                    if (policed is not null) sanitized.Add(policed);
+                }
+
+                // N6: compute diff vs current registered set BEFORE re-registering.
+                var before = _toolRegistry.SnapshotForPrefix(config.Prefix);
+                var afterNames = new HashSet<string>(sanitized.Select(s => s.Name), StringComparer.Ordinal);
+                var beforeNames = new HashSet<string>(before.Keys, StringComparer.Ordinal);
+
+                var added = afterNames.Except(beforeNames).ToList();
+                var removed = beforeNames.Except(afterNames).ToList();
+                var descChanged = new List<string>();
+                foreach (var name in afterNames.Intersect(beforeNames))
+                {
+                    var b = before[name].Tool;
+                    var a = sanitized.First(s => s.Name == name);
+                    if (!string.Equals(b.Description, a.Description, StringComparison.Ordinal))
+                    {
+                        descChanged.Add(name);
+                    }
+                }
+
+                if (added.Count > 0 || removed.Count > 0 || descChanged.Count > 0)
+                {
+                    _logger.LogInformation(
+                        "ToolSet diff for '{Name}': added=[{Added}] removed=[{Removed}] descChanged=[{Changed}]",
+                        config.Name,
+                        string.Join(",", added),
+                        string.Join(",", removed),
+                        string.Join(",", descChanged));
+                }
+
+                _toolRegistry.RegisterTools(config.Prefix, sanitized);
 
                 _logger.LogDebug(
                     "Discovered {Count} tools from '{Name}'",
-                    protocolTools.Count, config.Name);
+                    sanitized.Count, config.Name);
             }
             catch (Exception ex)
             {

@@ -28,6 +28,20 @@ public sealed record DownstreamServerOptions
     public bool Enabled        { get; init; } = true;
     public int  TimeoutSeconds { get; init; } = 30;
 
+    /// <summary>
+    /// Optional allowlist of tool names (without the prefix) that this proxy
+    /// will register. When set, any tool returned by the downstream that is
+    /// NOT in this list is rejected at refresh time and logged. When null
+    /// (the default for backward compatibility), all advertised tools are
+    /// registered — equivalent to the pre-Phase-9 behavior.
+    ///
+    /// Future maintainers: PREFER setting AllowedTools to a known catalog
+    /// once production has stabilized. The null default minimizes blast
+    /// radius for the initial rollout but provides no defense against
+    /// downstream-injected new tools.
+    /// </summary>
+    public List<string>? AllowedTools { get; init; }
+
     public sealed record EntraIdAuthOptions
     {
         public string TenantId     { get; init; } = "";

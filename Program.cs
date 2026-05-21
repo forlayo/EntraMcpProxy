@@ -128,6 +128,7 @@ builder.Services.AddSingleton<IPublicBaseUrlAccessor, PublicBaseUrlAccessor>();
 builder.Services.AddSingleton<IRedirectUriValidator, RedirectUriValidator>();
 builder.Services.AddSingleton<PkceValidator>();
 builder.Services.AddSingleton<ToolRegistry>();
+builder.Services.AddSingleton<ToolPolicyService>();
 builder.Services.AddSingleton<DownstreamClientManager>();
 builder.Services.AddSingleton<ProxyToolHandler>();
 builder.Services.AddHostedService<ToolAggregatorService>();
