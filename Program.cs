@@ -81,6 +81,7 @@ builder.Services.AddHttpContextAccessor();
 
 // --- Services ---
 builder.Services.AddSingleton<IPublicBaseUrlAccessor, PublicBaseUrlAccessor>();
+builder.Services.AddSingleton<IRedirectUriValidator, RedirectUriValidator>();
 builder.Services.AddSingleton<ToolRegistry>();
 builder.Services.AddSingleton<DownstreamClientManager>();
 builder.Services.AddSingleton<ProxyToolHandler>();
@@ -163,15 +164,27 @@ app.MapGet("/.well-known/openid-configuration", (IPublicBaseUrlAccessor accessor
     });
 });
 
-app.MapGet("/authorize", (HttpContext context) =>
+app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectValidator) =>
 {
     var q = context.Request.Query;
+
+    // H3: reject unlisted / malformed redirect_uri before any forwarding.
+    var redirectUri = q["redirect_uri"].ToString();
+    if (!redirectValidator.IsAllowed(redirectUri))
+    {
+        return Results.BadRequest(new
+        {
+            error = "invalid_request",
+            error_description = "redirect_uri is not in the allowlist.",
+        });
+    }
+
     var entraAuthorize = $"https://login.microsoftonline.com/{entraTenantId}/oauth2/v2.0/authorize";
     var qs = new Dictionary<string, string?>
     {
         ["response_type"]         = q["response_type"].ToString() is { Length: > 0 } rt ? rt : "code",
         ["client_id"]             = entraClientId,
-        ["redirect_uri"]          = q["redirect_uri"],
+        ["redirect_uri"]          = redirectUri,
         ["scope"]                 = $"openid profile offline_access api://{entraClientId}/user_impersonation",
         ["state"]                 = q["state"],
         ["code_challenge"]        = q["code_challenge"],
