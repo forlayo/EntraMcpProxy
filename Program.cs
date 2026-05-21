@@ -11,7 +11,9 @@
 // Entra ID configuration (EntraId:Authority, EntraId:ClientId, EntraId:TenantId) is required.
 // The application will throw on startup if any of these values are missing.
 
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using EntraMcpProxy.Auth;
 using EntraMcpProxy.Configuration;
@@ -125,6 +127,44 @@ builder.Services.AddCors(options =>
         // when no origins are configured for the request.)
     }));
 
+// M9: Use named HttpClient for the /token relay to Entra, managed by IHttpClientFactory.
+builder.Services.AddHttpClient("entra-token-relay");
+
+// M10: Per-IP fixed-window rate limit on the OAuth facade endpoints.
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+    {
+        // Only apply to /authorize and /token. Other paths get an unlimited bucket.
+        var path = ctx.Request.Path.Value ?? "";
+        bool gated = path.StartsWith("/authorize", StringComparison.OrdinalIgnoreCase)
+                  || path.StartsWith("/token",     StringComparison.OrdinalIgnoreCase);
+        if (!gated)
+        {
+            return RateLimitPartition.GetNoLimiter("ungated");
+        }
+
+        // Per-IP partition; falls back to "anonymous" if RemoteIpAddress is unavailable.
+        string key = ctx.Connection.RemoteIpAddress?.ToString() ?? "anonymous";
+
+        var perMinute = ctx.RequestServices
+            .GetRequiredService<IOptions<ProxyOptions>>()
+            .Value.RateLimit.RequestsPerMinute;
+
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: $"{path}|{key}",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = perMinute,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                AutoReplenishment = true,
+            });
+    });
+});
+
 builder.Services.AddProblemDetails();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 
@@ -150,6 +190,7 @@ if (app.Environment.IsProduction())
 
 app.UseExceptionHandler();
 app.UseCors();
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -223,15 +264,41 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
     return Results.Redirect($"{entraAuthorize}?{queryString}");
 });
 
-app.MapPost("/token", async (HttpContext context) =>
+app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory) =>
 {
+    // M13: reject oversized bodies before reading them all into memory.
+    const int MaxBodyBytes = 8 * 1024;
+    if (context.Request.ContentLength is long len && len > MaxBodyBytes)
+    {
+        context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+        return;
+    }
+
+    // Even without Content-Length, cap how much we'll read.
+    using var reader = new StreamReader(context.Request.Body);
+    var buffer = new char[MaxBodyBytes + 1];
+    int total = 0;
+    while (total <= MaxBodyBytes)
+    {
+        int n = await reader.ReadAsync(buffer.AsMemory(total, buffer.Length - total));
+        if (n == 0) break;
+        total += n;
+    }
+    if (total > MaxBodyBytes)
+    {
+        context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+        return;
+    }
+    var body = new string(buffer, 0, total);
+
+    // M9: managed HttpClient lifecycle.
+    var http = httpFactory.CreateClient("entra-token-relay");
     var tokenEndpoint = $"https://login.microsoftonline.com/{entraTenantId}/oauth2/v2.0/token";
-    var body = await new StreamReader(context.Request.Body).ReadToEndAsync();
-    using var http = new HttpClient();
-    var resp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Post, tokenEndpoint)
+    var req = new HttpRequestMessage(HttpMethod.Post, tokenEndpoint)
     {
         Content = new StringContent(body, System.Text.Encoding.UTF8, "application/x-www-form-urlencoded"),
-    });
+    };
+    var resp = await http.SendAsync(req);
     var respBody = await resp.Content.ReadAsStringAsync();
     context.Response.StatusCode = (int)resp.StatusCode;
     context.Response.ContentType = "application/json";
