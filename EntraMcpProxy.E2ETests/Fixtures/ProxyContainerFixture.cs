@@ -24,7 +24,10 @@ namespace EntraMcpProxy.E2ETests.Fixtures;
 public sealed class ProxyContainerFixture : IAsyncDisposable
 {
     private const string ProxyImage = "entra-mcp-proxy:e2e";
-    private const string WireMockImage = "wiremock/wiremock:3.9.1";
+    // Pinned by digest for supply-chain hygiene. Tag '3.9.1' is preserved in the comment
+    // for human readability; the digest is authoritative. Rotate both when bumping versions.
+    // Source: docker inspect wiremock/wiremock:3.9.1 (resolved during Task 1.5 follow-up).
+    private const string WireMockImage = "wiremock/wiremock@sha256:8fe02bc3f9b63deb1454d41750dbaf081adf4b3e8c74fd8e31f790bee5647b88";
 
     private IFutureDockerImage? _proxyImage;
     private INetwork? _network;
