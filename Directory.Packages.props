@@ -35,5 +35,8 @@
     <PackageVersion Include="Testcontainers" Version="4.0.0" />
     <PackageVersion Include="System.IdentityModel.Tokens.Jwt" Version="8.2.0" />
     <PackageVersion Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.2.0" />
+    <!-- Block C: Load Tests (NBomber — explicit operator runs only, not CI) -->
+    <PackageVersion Include="NBomber" Version="6.4.0" />
+    <PackageVersion Include="NBomber.Http" Version="6.2.0" />
   </ItemGroup>
 </Project>

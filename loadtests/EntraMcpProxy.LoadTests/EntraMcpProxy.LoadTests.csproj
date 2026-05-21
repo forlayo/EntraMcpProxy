@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- Load tests are run explicitly by the operator, not as part of CI -->
+    <IsTestProject>false</IsTestProject>
+    <OutputType>Exe</OutputType>
+    <!-- Inherit TreatWarningsAsErrors from Directory.Build.props -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- NBomber load testing framework (pinned in Directory.Packages.props) -->
+    <PackageReference Include="NBomber" />
+    <PackageReference Include="NBomber.Http" />
+    <!-- JWT minting for synthetic user tokens -->
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" />
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" />
+  </ItemGroup>
+
+</Project>

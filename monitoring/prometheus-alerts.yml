@@ -1,0 +1,204 @@
+---
+# EntraMcpProxy — Prometheus Alerting Rules
+#
+# Load this file via your Prometheus rule_files configuration or a PrometheusRule
+# CRD (kube-prometheus-stack). All metrics are emitted by the Block B observability
+# layer (prometheus-net.AspNetCore).
+#
+# Metric name reference:
+#   oauth_rejections_total{reason}        — counter; OAuth request rejections by reason
+#   obo_exchanges_total{outcome}          — counter; OBO token exchanges by outcome
+#   tool_latency_seconds                  — histogram; end-to-end tool call latency
+#   up{job}                               — standard scrape health gauge
+#   entra_mcp_proxy_obo_cache_entries     — gauge; current OBO cache entry count
+#
+# Alert routing: configure Alertmanager to route by severity label:
+#   severity: critical  → PagerDuty / SMS (immediate wake-up)
+#   severity: warning   → Slack on-call channel (business hours triage)
+#   severity: info      → Slack general channel (no pager)
+
+groups:
+  - name: entra-mcp-proxy
+    rules:
+
+      # -----------------------------------------------------------------------
+      # INSTANCE HEALTH
+      # -----------------------------------------------------------------------
+
+      - alert: EntraMcpProxyDown
+        expr: up{job="entra-mcp-proxy"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "EntraMcpProxy instance is down"
+          description: >
+            The Prometheus scrape target for EntraMcpProxy (job="entra-mcp-proxy")
+            has been unreachable for more than 2 minutes. This means /api/healthz
+            is not responding or the container has crashed.
+          runbook: "docs/incident-runbooks/runbook-auth-outage.md"
+          action: >
+            1. Check container status: az containerapp show / kubectl get pods.
+            2. Inspect logs for crash reason.
+            3. Restart the deployment if it is in CrashLoopBackOff.
+            4. Follow runbook-auth-outage.md Step 1.
+
+      # -----------------------------------------------------------------------
+      # OAUTH REJECTION RATE — SECURITY SIGNALS
+      # -----------------------------------------------------------------------
+
+      - alert: HighOauthRedirectUriRejections
+        # Fires when more than 10 redirect_uri rejections per minute arrive.
+        # This is a strong signal of open-redirect probing or a misconfigured
+        # integration sending the wrong redirect_uri.
+        expr: >
+          rate(oauth_rejections_total{reason="redirect_uri"}[1m]) * 60 > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "High rate of OAuth redirect_uri rejections (possible probing)"
+          description: >
+            More than 10 requests per minute are being rejected because the
+            redirect_uri is not in the allowlist. This may indicate an attacker
+            probing for open-redirect vulnerabilities, or a misconfigured
+            third-party integration.
+          runbook: "docs/operations.md"
+          action: >
+            1. Query audit log for redirect_uri_rejected events to identify the
+               source IP and the redirect_uri being attempted.
+            2. If the source is a legitimate integration, add the correct
+               redirect_uri to Proxy:AllowedRedirectUris (requires deployment).
+            3. If the source looks like probing (random IPs, many different URIs),
+               consider adding IP-level rate limiting at the ingress.
+
+      - alert: HighOauthPkceMissingRate
+        # Fires when more than 10 PKCE-missing rejections per minute arrive.
+        # Could indicate an OAuth client that was not updated to use PKCE, or
+        # an attacker attempting to use the authorization_code flow without PKCE
+        # (to later perform code injection attacks).
+        expr: >
+          rate(oauth_rejections_total{reason="pkce_missing"}[1m]) * 60 > 10
+        for: 2m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "High rate of OAuth requests missing PKCE"
+          description: >
+            More than 10 requests per minute are missing the code_challenge /
+            code_challenge_method=S256 parameters required by the proxy.
+            Legitimate callers (claude.ai) always send PKCE. This pattern
+            suggests a non-standard client or an attack attempt.
+          runbook: "docs/operations.md"
+          action: >
+            1. Query audit log for pkce_missing events to identify source.
+            2. If claude.ai itself is the source (check User-Agent in logs),
+               there may be a regression in claude.ai's MCP connector — report
+               to Anthropic.
+            3. If source is an unknown client, investigate and consider blocking
+               at the ingress.
+
+      # -----------------------------------------------------------------------
+      # OBO EXCHANGE HEALTH
+      # -----------------------------------------------------------------------
+
+      - alert: HighOboExchangeErrorRate
+        # Fires when more than 5% of OBO exchanges fail over the last 10 minutes.
+        # OBO failures mean users cannot call tools. Common causes: expired
+        # client_secret, revoked user sessions, missing admin consent.
+        expr: >
+          (
+            rate(obo_exchanges_total{outcome="error"}[10m])
+            /
+            (rate(obo_exchanges_total[10m]) + 1e-10)
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "OBO token exchange error rate exceeds 5%"
+          description: >
+            More than 5% of On-Behalf-Of token exchanges have failed in the
+            last 10 minutes. Users will see tool call failures. The most common
+            causes are: expired client_secret, user sessions revoked by Entra
+            conditional access, or missing admin consent for the OBO scope.
+          runbook: "docs/incident-runbooks/runbook-auth-outage.md"
+          action: >
+            1. Check audit log for obo_exchange_failed events and the error field.
+            2. If error is invalid_client: verify client_secret is current.
+            3. If error is invalid_grant: user sessions may have been revoked —
+               users need to re-authenticate.
+            4. If error is AADSTS65001: admin consent may have been withdrawn —
+               re-run: az ad app permission admin-consent --id <CLIENT_ID>.
+
+      # -----------------------------------------------------------------------
+      # LATENCY
+      # -----------------------------------------------------------------------
+
+      - alert: HighToolLatencyP99
+        # Fires when the P99 latency for tool calls exceeds 5 seconds over the
+        # last 5 minutes. Tool calls that take >5s at the 99th percentile indicate
+        # a problem with the downstream MCP or with OBO token exchange.
+        # Note: tool_latency_seconds must be a histogram (not summary) for this
+        # quantile query to work. Verify your instrumentation emits _bucket/_count/_sum.
+        expr: >
+          histogram_quantile(
+            0.99,
+            rate(tool_latency_seconds_bucket[5m])
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Tool call P99 latency exceeds 5 seconds"
+          description: >
+            The 99th percentile latency for tool calls has exceeded 5 seconds
+            for the last 5 minutes. This may indicate the downstream MCP is slow
+            to respond, the OBO exchange is timing out, or the proxy is
+            resource-constrained.
+          runbook: "docs/operations.md"
+          action: >
+            1. Check Grafana latency breakdown panel to identify which phase is
+               slow (OBO exchange vs. downstream call).
+            2. Check downstream MCP status (Azure DevOps status page if ADO).
+            3. Check proxy container CPU/memory — scale out if constrained.
+            4. Inspect circuit breaker state if resilience middleware is enabled.
+
+      # -----------------------------------------------------------------------
+      # OBO CACHE HEALTH
+      # -----------------------------------------------------------------------
+
+      - alert: OboCacheGrowingUnbounded
+        # Fires when the OBO cache exceeds 10,000 entries. The OBO cache is an
+        # in-memory MemoryCache keyed on (oid, tid, scope). Under normal load
+        # this should stay well under 1,000 entries. A value above 10,000 suggests
+        # the eviction policy is not working or there is a memory leak.
+        # This is an INFO alert — it does not require immediate action but should
+        # be investigated within business hours.
+        expr: entra_mcp_proxy_obo_cache_entries > 10000
+        for: 10m
+        labels:
+          severity: info
+          team: platform
+        annotations:
+          summary: "OBO cache has more than 10,000 entries — eviction may not be working"
+          description: >
+            The in-memory OBO token cache has accumulated more than 10,000 entries.
+            Under normal load (hundreds of users) this should not happen. Possible
+            causes: cache eviction disabled, entries not expiring, or a key
+            cardinality explosion (e.g., scope parameter varies per request).
+          action: >
+            1. Check proxy memory usage — high cache size will increase RSS.
+            2. Review OboCacheKey composition: ensure scope is normalised
+               (lowercase, sorted) so the same user+scope does not create
+               multiple entries.
+            3. Verify MemoryCache eviction is configured with a size limit in
+               Services/EntraIdOBOHandler.cs.
+            4. If memory is critical, restart the proxy (cache is in-memory only
+               and will be empty after restart — users will need one OBO exchange
+               each on the next tool call).
