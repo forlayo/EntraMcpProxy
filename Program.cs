@@ -387,7 +387,10 @@ app.Use(async (context, next) =>
     await next();
 });
 
-app.MapMcp();
+// N14: explicit auth requirement on every MCP route, in addition to the
+// custom middleware. Defense in depth — if the middleware ordering or
+// path-exemption list ever changes, MCP routes stay protected.
+app.MapMcp().RequireAuthorization();
 app.Run();
 
 // Marker for Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>.
