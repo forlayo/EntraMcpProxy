@@ -17,6 +17,10 @@ public class RedirectUriRejectionTests
 {
     private const string AllowedRedirect = "https://claude.ai/api/mcp/auth_callback";
 
+    // 43-char base64url string (valid lower bound per RFC 7636 §4.2).
+    // All requests to /authorize must supply valid PKCE params (H4 enforcement).
+    private const string ValidChallenge = "abcd1234abcd1234abcd1234abcd1234abcd1234abc";
+
     [Fact]
     public async Task Authorize_with_allowed_redirect_uri_redirects_to_entra()
     {
@@ -31,7 +35,7 @@ public class RedirectUriRejectionTests
             $"/authorize?response_type=code" +
             $"&redirect_uri={System.Uri.EscapeDataString(AllowedRedirect)}" +
             $"&state=abc" +
-            $"&code_challenge=challenge" +
+            $"&code_challenge={ValidChallenge}" +
             $"&code_challenge_method=S256");
 
         // 302 Redirect to Entra; the Location header should target login.microsoftonline.com
@@ -51,7 +55,7 @@ public class RedirectUriRejectionTests
         var resp = await http.GetAsync(
             "/authorize?response_type=code" +
             "&redirect_uri=https%3A%2F%2Fevil.example.com%2Fcb" +
-            "&state=abc&code_challenge=c&code_challenge_method=S256");
+            $"&state=abc&code_challenge={ValidChallenge}&code_challenge_method=S256");
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         // Must NOT have redirected — the Location header should be unset.
@@ -67,7 +71,8 @@ public class RedirectUriRejectionTests
             AllowAutoRedirect = false,
         });
 
-        var resp = await http.GetAsync("/authorize?response_type=code&state=abc&code_challenge=c&code_challenge_method=S256");
+        var resp = await http.GetAsync(
+            $"/authorize?response_type=code&state=abc&code_challenge={ValidChallenge}&code_challenge_method=S256");
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
@@ -85,7 +90,7 @@ public class RedirectUriRejectionTests
         var resp = await http.GetAsync(
             "/authorize?response_type=code" +
             "&redirect_uri=http%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback" +
-            "&state=abc&code_challenge=c&code_challenge_method=S256");
+            $"&state=abc&code_challenge={ValidChallenge}&code_challenge_method=S256");
 
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }

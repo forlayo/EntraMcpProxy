@@ -82,6 +82,7 @@ builder.Services.AddHttpContextAccessor();
 // --- Services ---
 builder.Services.AddSingleton<IPublicBaseUrlAccessor, PublicBaseUrlAccessor>();
 builder.Services.AddSingleton<IRedirectUriValidator, RedirectUriValidator>();
+builder.Services.AddSingleton<PkceValidator>();
 builder.Services.AddSingleton<ToolRegistry>();
 builder.Services.AddSingleton<DownstreamClientManager>();
 builder.Services.AddSingleton<ProxyToolHandler>();
@@ -164,7 +165,7 @@ app.MapGet("/.well-known/openid-configuration", (IPublicBaseUrlAccessor accessor
     });
 });
 
-app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectValidator) =>
+app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectValidator, PkceValidator pkceValidator) =>
 {
     var q = context.Request.Query;
 
@@ -176,6 +177,20 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
         {
             error = "invalid_request",
             error_description = "redirect_uri is not in the allowlist.",
+        });
+    }
+
+    // H4: PKCE is mandatory at the proxy level. The discovery doc advertises S256
+    // — clients MUST send code_challenge with code_challenge_method=S256.
+    var pkce = pkceValidator.Validate(
+        challenge: q["code_challenge"],
+        method:    q["code_challenge_method"]);
+    if (!pkce.IsValid)
+    {
+        return Results.BadRequest(new
+        {
+            error = "invalid_request",
+            error_description = pkce.Error,
         });
     }
 
