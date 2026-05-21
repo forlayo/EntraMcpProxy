@@ -39,11 +39,11 @@ This proxy solves that by acting as an **OAuth Authorization Server facade** in 
 
 - **OAuth AS facade** — exposes `/authorize`, `/token`, and `/.well-known/openid-configuration` so Claude Web can complete the standard OAuth 2.0 + PKCE flow
 - **RFC 9728 compliant** — `/.well-known/oauth-protected-resource` points Claude Web to the proxy as the authorization server
-- **On-Behalf-Of (OBO) identity delegation** — every downstream call uses the authenticated user's real identity, never a shared service account
+- **On-Behalf-Of (OBO) identity delegation** — tool calls use the authenticated user's Entra token; see [Identity Delegation](#identity-delegation) for the full picture
 - **Tool aggregation with namespacing** — tools from multiple MCP backends are merged under a single endpoint, prefixed by server name (`azdevops__create_work_item`, `internal__list_projects`, etc.)
 - **Background tool discovery** — connects to all configured downstream servers at startup and refreshes tool lists on a configurable interval
 - **Multiple auth modes for downstream servers** — supports OBO (for Azure DevOps), API key, and Entra ID client credentials
-- **Kubernetes-ready** — handles `X-Forwarded-Proto`/`X-Forwarded-Host` from ingress TLS termination
+- **Kubernetes-ready** — external URLs derived from `Proxy:PublicBaseUrl`; no dependency on forwarded headers
 - **Docker image included**
 
 ---
@@ -60,36 +60,38 @@ See the [Entra ID Setup](#entra-id-setup) section below for the full one-time co
 
 ### 2. Configure the proxy
 
-Edit `appsettings.json` (or use environment variables / Kubernetes secrets):
+All settings can be supplied via `appsettings.json` OR environment variables. **Secrets MUST come from environment variables, Kubernetes Secrets, or Azure Key Vault** — never from `appsettings.json`.
 
-```json
-{
-  "EntraId": {
-    "Authority": "https://login.microsoftonline.com/{tenant-id}/v2.0",
-    "TenantId": "{tenant-id}",
-    "ClientId": "{client-id}"
-  },
-  "DownstreamServers": [
-    {
-      "Name": "Azure DevOps",
-      "Prefix": "azdevops",
-      "AuthType": "OBOToken",
-      "BaseUrl": "https://mcp.dev.azure.com/{your-organization}",
-      "OBO": {
-        "TenantId": "{tenant-id}",
-        "ClientId": "{client-id}",
-        "ClientSecret": "{client-secret}",
-        "TargetScope": "2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tools"
-      },
-      "Enabled": true,
-      "TimeoutSeconds": 60
-    }
-  ],
-  "Proxy": {
-    "RefreshIntervalMinutes": 5
-  }
-}
+ASP.NET Core's configuration provider chain maps env vars to section paths via double-underscore separators:
+
+| Setting                                  | Env variable                              |
+|------------------------------------------|-------------------------------------------|
+| `EntraId:TenantId`                       | `EntraId__TenantId`                       |
+| `EntraId:ClientId`                       | `EntraId__ClientId`                       |
+| `EntraId:Authority`                      | `EntraId__Authority`                      |
+| `Proxy:PublicBaseUrl`                    | `Proxy__PublicBaseUrl`                    |
+| `Proxy:AllowedRedirectUris:0`            | `Proxy__AllowedRedirectUris__0`           |
+| `Proxy:EgressAllowlist:0`                | `Proxy__EgressAllowlist__0`               |
+| `DownstreamServers:0:OBO:ClientSecret`   | `DownstreamServers__0__OBO__ClientSecret` |
+
+For Azure Key Vault, use the
+[Azure.Extensions.AspNetCore.Configuration.Secrets](https://learn.microsoft.com/aspnet/core/security/key-vault-configuration)
+provider; it auto-maps Key Vault secret names of the form
+`DownstreamServers--0--OBO--ClientSecret` onto the config path.
+
+For Kubernetes, use a Secret resource mounted as env vars:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: entra-mcp-proxy-secrets
+type: Opaque
+stringData:
+  DownstreamServers__0__OBO__ClientSecret: <real secret>
 ```
+
+`appsettings.json` may contain non-secret defaults — Authority, TenantId, ClientId, the `Proxy` block, and the `DownstreamServers` shape — but MUST NOT contain `ClientSecret` values.
 
 ### 3. Run
 
@@ -129,18 +131,16 @@ Proxy      → forward → login.microsoftonline.com/{tenant}/oauth2/v2.0/token
 Claude Web → Bearer token in Authorization header on every MCP request
 ```
 
-### Identity Delegation (OBO)
+### Identity Delegation
 
-When Claude Web calls an MCP tool, the proxy:
+For tools called by an authenticated user, the proxy exchanges the user's Entra access token for a downstream OBO token via RFC 8693 On-Behalf-Of (the `_targetScope` and `OBO.ClientSecret` configure the exchange). The downstream MCP server receives a token whose `oid` claim is the calling user's — audit logs at the downstream attribute the call to the real user.
 
-1. Validates the incoming Bearer token (Entra ID JWT)
-2. Exchanges it for a downstream token via OAuth 2.0 On-Behalf-Of (RFC 8693)
-3. Forwards the tool call to the appropriate downstream MCP server using that token
+For tool **discovery** (`tools/list` against each downstream at startup and on the configured refresh interval), the proxy optionally uses a service-principal token via the `client_credentials` grant if `DownstreamServers[*]:OBO:DiscoveryScope` is configured. Discovery defaults to **disabled** for the SP path — the operator must explicitly opt in by setting `DiscoveryScope` to a narrow scope like `{resource-id}/Discovery.Tools`. If `DiscoveryScope` is null, discovery only succeeds when a user request happens to trigger it.
 
 This means:
-- **Permissions are fully respected** — if the user has no access to a repo, they cannot read it through Claude either
-- **Audit logs show real users** — no actions attributed to a service account
-- **No privilege escalation** — the proxy cannot grant more access than the user already has
+- **Tool calls** are always under the calling user's identity (when the user authenticated). Audit logs are accurate.
+- **Tool discovery** uses an optional service-principal token under a narrow configured scope. Operators who do not configure `DiscoveryScope` defer discovery to the first user request.
+- **The proxy cannot grant access the user does not already have** — downstream ACLs are honored.
 
 ### Tool Namespacing
 
@@ -199,15 +199,20 @@ All keys are **required**. The application will throw on startup if any are miss
 | `TimeoutSeconds` | HTTP timeout for downstream calls |
 | `OBO.TenantId` | Tenant for OBO exchange |
 | `OBO.ClientId` | Client ID used in OBO exchange |
-| `OBO.ClientSecret` | Client secret used in OBO exchange |
+| `OBO.ClientSecret` | **Secret** — supply via env var or Key Vault, never in appsettings.json |
 | `OBO.TargetScope` | Downstream resource scope, e.g. `{resource-id}/{scope}` |
+| `OBO.DiscoveryScope` | Optional narrow scope for SP-mode tool discovery (null = disabled) |
 | `ApiKey` | API key (when `AuthType` is `ApiKey`) |
 
 ### `Proxy`
 
 | Key | Description | Default |
 |---|---|---|
+| `PublicBaseUrl` | External base URL of the proxy, used in OAuth discovery and WWW-Authenticate | required |
+| `AllowedRedirectUris` | Exact allowlist of permitted `redirect_uri` values | required |
+| `EgressAllowlist` | Hostname allowlist for outbound downstream connections | required |
 | `RefreshIntervalMinutes` | How often the background service rediscovers tools from all downstream servers | `5` |
+| `ToolResult:MaxBytes` | Maximum response body size from a tool call (bytes) | `262144` (256 KiB) |
 
 ---
 
@@ -228,7 +233,7 @@ Note the **Application (client) ID** and **Directory (tenant) ID**.
 
 Under **Certificates & secrets → New client secret**. Copy the value immediately.
 
-This secret is used both by the proxy (to perform OBO exchanges) and by Claude Web (as `client_secret` in the token request).
+This secret is used both by the proxy (to perform OBO exchanges) and by Claude Web (as `client_secret` in the token request). Store it in Azure Key Vault or a Kubernetes Secret — never in source control.
 
 ### Step 3 — Expose an API Scope
 
@@ -257,7 +262,7 @@ Users must exist in the Azure DevOps organization at `https://dev.azure.com/{org
 |---|---|
 | `EntraId:TenantId` | Directory (tenant) ID |
 | `EntraId:ClientId` | Application (client) ID |
-| `OBO:ClientSecret` | Client secret from Step 2 |
+| `OBO:ClientSecret` | Client secret from Step 2 (via env var or Key Vault) |
 | `OBO:TargetScope` | `2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tools` |
 | Claude Web `client_id` | Application (client) ID |
 | Claude Web `client_secret` | Client secret from Step 2 |
@@ -269,6 +274,70 @@ Users must exist in the Azure DevOps organization at `https://dev.azure.com/{org
 
 The project ships a multi-stage `Dockerfile` targeting `mcr.microsoft.com/dotnet/aspnet:10.0`.
 
+### Required Configuration
+
+```yaml
+# Kubernetes example
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: entra-mcp-proxy
+spec:
+  template:
+    spec:
+      containers:
+      - name: proxy
+        image: entra-mcp-proxy@sha256:<digest>  # Pin by digest, not tag
+        env:
+        - name: ASPNETCORE_ENVIRONMENT
+          value: Production
+        - name: EntraId__Authority
+          value: https://login.microsoftonline.com/{tenant-id}/v2.0
+        - name: EntraId__TenantId
+          value: {tenant-id}
+        - name: EntraId__ClientId
+          value: {client-id}
+        - name: Proxy__PublicBaseUrl
+          value: https://mcp.{your-domain}     # Used in OAuth discovery
+        - name: Proxy__AllowedRedirectUris__0
+          value: https://claude.ai/api/mcp/auth_callback
+        - name: Proxy__EgressAllowlist__0
+          value: mcp.dev.azure.com
+        - name: DownstreamServers__0__Name
+          value: "Azure DevOps"
+        - name: DownstreamServers__0__Prefix
+          value: azdevops
+        - name: DownstreamServers__0__BaseUrl
+          value: https://mcp.dev.azure.com/{your-org}
+        - name: DownstreamServers__0__AuthType
+          value: OBOToken
+        - name: DownstreamServers__0__OBO__TenantId
+          value: {tenant-id}
+        - name: DownstreamServers__0__OBO__ClientId
+          value: {client-id}
+        - name: DownstreamServers__0__OBO__TargetScope
+          value: 2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tools
+        envFrom:
+        - secretRef:
+            name: entra-mcp-proxy-secrets
+```
+
+### Forwarded Headers
+
+This deployment does NOT trust `X-Forwarded-*` headers. The proxy's external URLs (discovery, OAuth metadata, WWW-Authenticate) derive from `Proxy:PublicBaseUrl` exclusively. Your ingress should still terminate TLS — Kestrel handles HTTP on the listening port — but the proxy's outbound URL signaling is independent of the ingress's header set.
+
+### Health Check
+
+```
+GET /api/healthz → 200 { "status": "Healthy", "timestamp": "..." }
+```
+
+Exempt from authentication and rate limiting. Use as the liveness/readiness probe.
+
+### Audit Logging
+
+The category `EntraMcpProxy.Audit` emits one JSON record per security-relevant event. Pipe this category to an immutable store (Azure Monitor with immutability policy, SIEM, etc.). Other log categories are operational and can land in the normal application log stream.
+
 ### Docker
 
 ```bash
@@ -277,21 +346,38 @@ docker run -p 8080:80 \
   -e EntraId__Authority="https://login.microsoftonline.com/{tenant}/v2.0" \
   -e EntraId__TenantId="{tenant}" \
   -e EntraId__ClientId="{client-id}" \
+  -e Proxy__PublicBaseUrl="https://mcp.{your-domain}" \
   entra-mcp-proxy
 ```
 
-### Kubernetes / AKS
+---
 
-When deployed behind a Kubernetes ingress that terminates TLS, the proxy automatically trusts `X-Forwarded-Proto` and `X-Forwarded-Host` headers so that OAuth endpoints advertise correct `https://` URLs.
+## Security Posture
 
-No additional ingress annotation is required — the forwarded header handling is configured unconditionally in `Program.cs`.
+This deployment includes the following defenses:
 
-### Health Check
+| Defense | Where | Notes |
+|---|---|---|
+| JWT validation | `Program.cs` | Explicit issuer/audience/lifetime/signing key checks, 2-minute clock skew, `MapInboundClaims=false` |
+| PKCE enforcement | `/authorize` | S256 required; rejected at proxy layer (not relying on Entra) |
+| redirect_uri allowlist | `/authorize` | Exact ordinal match against configured list; https-only |
+| Forwarded headers | (removed) | OAuth URLs derive from `Proxy:PublicBaseUrl`, never request headers |
+| Rate limiting | `/authorize` + `/token` | Per-IP fixed window, configurable |
+| Body size limit | `/token` | 8 KB |
+| CORS | All endpoints | Configurable allowlist; empty list = no CORS |
+| OBO cache key | `EntraIdOBOHandler` | `(oid, tid, aud, scope)` — collision-free |
+| Cache TTL | `EntraIdOBOHandler` | Min(Entra `expires_in`, 10 min) |
+| SP fallback | `EntraIdOBOHandler` | Gated behind `DiscoveryContext.Enter()` + explicit `DiscoveryScope` |
+| Tool description provenance | `ToolPolicyService` | `[Source: downstream=...]` prefix on every description |
+| Tool result provenance | `ToolResultWrapper` | `<downstream-content source=... tool=...>` wrapping |
+| Tool result size cap | `ToolResultWrapper` | `Proxy:ToolResult:MaxBytes`, default 256 KiB |
+| Per-tool authorization | `DownstreamAuthorizationFilter` | Optional; default = permit-all |
+| Egress allowlist (config) | `DownstreamServerOptionsValidator` | Startup-time check |
+| Egress allowlist (runtime) | `EgressEnforcingHandler` | Per-request check |
+| Audit trail | `AuditLog` | JSON under `EntraMcpProxy.Audit` category |
+| Exception handler | `GlobalExceptionHandler` | OBO + auth-namespace InvalidOps → 502 + sanitized; Production never echoes Entra body |
 
-```
-GET /api/healthz
-→ 200 { "status": "Healthy", "timestamp": "..." }
-```
+For the full threat model, see `docs/threat-model.md`. For deployment governance, see `docs/operations.md`.
 
 ---
 
@@ -337,3 +423,5 @@ Microsoft is actively working to close the Entra ID dynamic client registration 
 - [RFC 7636 — PKCE for OAuth Public Clients](https://www.rfc-editor.org/rfc/rfc7636)
 - [RFC 8707 — Resource Indicators for OAuth 2.0](https://www.rfc-editor.org/rfc/rfc8707)
 - [Model Context Protocol](https://modelcontextprotocol.io)
+- [Threat Model](docs/threat-model.md)
+- [Operations Runbook](docs/operations.md)
