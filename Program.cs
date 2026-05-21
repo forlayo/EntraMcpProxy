@@ -132,6 +132,7 @@ builder.Services.AddSingleton<ToolPolicyService>();
 builder.Services.AddSingleton<DownstreamClientManager>();
 builder.Services.AddSingleton<ToolResultWrapper>();
 builder.Services.AddSingleton<DownstreamAuthorizationFilter>();
+builder.Services.AddSingleton<AuditLog>();
 builder.Services.AddSingleton<ProxyToolHandler>();
 builder.Services.AddHostedService<ToolAggregatorService>();
 
@@ -263,7 +264,7 @@ app.MapGet("/.well-known/openid-configuration", (IPublicBaseUrlAccessor accessor
     });
 });
 
-app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectValidator, PkceValidator pkceValidator) =>
+app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectValidator, PkceValidator pkceValidator, AuditLog audit) =>
 {
     var q = context.Request.Query;
 
@@ -271,6 +272,9 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
     var redirectUri = q["redirect_uri"].ToString();
     if (!redirectValidator.IsAllowed(redirectUri))
     {
+        audit.RedirectUriRejected(
+            clientIp: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            rejectedUri: redirectUri);
         return Results.BadRequest(new
         {
             error = "invalid_request",
@@ -285,6 +289,9 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
         method:    q["code_challenge_method"]);
     if (!pkce.IsValid)
     {
+        audit.PkceMissing(
+            clientIp: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            error: pkce.Error ?? "PKCE missing");
         return Results.BadRequest(new
         {
             error = "invalid_request",

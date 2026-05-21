@@ -375,6 +375,7 @@ public class TwoUserConcurrencyTests
                         sp.GetRequiredService<IOptions<List<DownstreamServerOptions>>>(),
                         sp.GetRequiredService<ILoggerFactory>(),
                         sp.GetRequiredService<IHttpContextAccessor>(),
+                        sp.GetRequiredService<EntraMcpProxy.Infrastructure.AuditLog>(),
                         downstreamTestServer));
             });
         }
@@ -394,8 +395,9 @@ public class TwoUserConcurrencyTests
             IOptions<List<DownstreamServerOptions>> configs,
             ILoggerFactory loggerFactory,
             IHttpContextAccessor httpContextAccessor,
+            EntraMcpProxy.Infrastructure.AuditLog audit,
             TestServer testServer)
-            : base(configs, loggerFactory, httpContextAccessor)
+            : base(configs, loggerFactory, httpContextAccessor, audit)
         {
             _testServer = testServer;
         }

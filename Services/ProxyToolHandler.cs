@@ -2,6 +2,7 @@ using System.Linq;
 using System.Security.Claims;
 using EntraMcpProxy.Auth;
 using EntraMcpProxy.Configuration;
+using EntraMcpProxy.Infrastructure;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol;
@@ -18,6 +19,7 @@ public class ProxyToolHandler
     private readonly DownstreamAuthorizationFilter _authz;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger<ProxyToolHandler> _logger;
+    private readonly AuditLog _audit;
 
     public ProxyToolHandler(
         ToolRegistry toolRegistry,
@@ -25,7 +27,8 @@ public class ProxyToolHandler
         ToolResultWrapper wrapper,
         DownstreamAuthorizationFilter authz,
         IHttpContextAccessor httpContextAccessor,
-        ILogger<ProxyToolHandler> logger)
+        ILogger<ProxyToolHandler> logger,
+        AuditLog audit)
     {
         _toolRegistry = toolRegistry;
         _clientManager = clientManager;
@@ -33,6 +36,7 @@ public class ProxyToolHandler
         _authz = authz;
         _httpContextAccessor = httpContextAccessor;
         _logger = logger;
+        _audit = audit;
     }
 
     public ValueTask<ListToolsResult> HandleListToolsAsync(
@@ -61,7 +65,7 @@ public class ProxyToolHandler
 
         if (!_authz.IsAllowed(user, toolName))
         {
-            _logger.LogWarning("Authorization denied: user attempted to call '{Tool}' without permission", toolName);
+            _audit.AuthzDenied(user, toolName, reason: "not in allowed groups");
             throw new McpException($"Not authorized to call tool '{toolName}'");
         }
 
@@ -77,6 +81,9 @@ public class ProxyToolHandler
             "Routing '{PrefixedName}' → '{Prefix}':'{OriginalName}'",
             toolName, entry.Prefix, entry.OriginalName);
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var correlationId = System.Guid.NewGuid().ToString();
+
         var downstreamParams = new CallToolRequestParams
         {
             Name = entry.OriginalName,
@@ -86,11 +93,19 @@ public class ProxyToolHandler
         try
         {
             var result = await client.CallToolAsync(downstreamParams, cancellationToken);
+            sw.Stop();
+
+            _audit.ToolInvocation(
+                user,
+                tool: toolName,
+                args: request.Params?.Arguments,
+                status: result.IsError == true ? "error" : "success",
+                latencyMs: sw.ElapsedMilliseconds,
+                correlationId: correlationId);
 
             if (result.IsError == true)
             {
-                // N17 (Phase 12 will fully scrub content from logs): log only the block
-                // count — never the content itself (it may contain PII or attacker payloads).
+                // N17: log only the count, never the content (may contain PII or attacker payloads).
                 _logger.LogWarning(
                     "Downstream '{Prefix}':'{Tool}' returned isError=true. ContentBlocks={Count}",
                     entry.Prefix, entry.OriginalName, result.Content.Count);
@@ -107,6 +122,14 @@ public class ProxyToolHandler
         }
         catch (Exception ex)
         {
+            sw.Stop();
+            _audit.ToolInvocation(
+                user,
+                tool: toolName,
+                args: request.Params?.Arguments,
+                status: "exception",
+                latencyMs: sw.ElapsedMilliseconds,
+                correlationId: correlationId);
             _logger.LogError(ex,
                 "Downstream '{Prefix}':'{Tool}' threw exception",
                 entry.Prefix, entry.OriginalName);

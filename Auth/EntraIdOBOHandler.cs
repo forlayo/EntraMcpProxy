@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using EntraMcpProxy.Infrastructure;
 
 namespace EntraMcpProxy.Auth;
 
@@ -38,6 +39,7 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
     private readonly string? _discoveryScope;
     private readonly string _tokenEndpointBaseUrl;
     private readonly ILogger<EntraIdOBOHandler> _logger;
+    private readonly AuditLog? _audit;
 
     // C1: cache keyed on validated-claim composite, not raw token hash.
     private readonly ConcurrentDictionary<OboCacheKey, CacheEntry> _oboCache = new();
@@ -74,7 +76,8 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
         HttpMessageHandler? tokenHandler = null,
         HttpMessageHandler? innerHandler = null,
         string? discoveryScope = null,
-        string? tokenEndpointBaseUrl = null)
+        string? tokenEndpointBaseUrl = null,
+        AuditLog? audit = null)
         : base(innerHandler ?? new HttpClientHandler())
     {
         _httpContextAccessor = httpContextAccessor;
@@ -87,6 +90,7 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
             ? "https://login.microsoftonline.com"
             : tokenEndpointBaseUrl.TrimEnd('/');
         _logger = logger;
+        _audit = audit;
         _tokenClient = new HttpClient(tokenHandler ?? new HttpClientHandler());
 
         // M14: start background eviction loop.
@@ -299,6 +303,10 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
             _logger.LogError("OBO: token request failed with status {Status}", response.StatusCode);
             // H7: body goes to DEBUG only — never to the exception Message.
             _logger.LogDebug("OBO: token failure body: {Body}", body);
+            _audit?.OboExchangeFailed(
+                user: _httpContextAccessor.HttpContext?.User,
+                targetScope: _targetScope,
+                error: $"HTTP {(int)response.StatusCode}");
             throw new OboExchangeException(
                 $"OBO token exchange failed ({(int)response.StatusCode}).",
                 innerEntraBody: body);

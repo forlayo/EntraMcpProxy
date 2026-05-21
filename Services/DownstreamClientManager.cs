@@ -3,6 +3,7 @@ using Microsoft.Extensions.Options;
 using ModelContextProtocol.Client;
 using EntraMcpProxy.Auth;
 using EntraMcpProxy.Configuration;
+using EntraMcpProxy.Infrastructure;
 
 namespace EntraMcpProxy.Services;
 
@@ -13,16 +14,19 @@ public class DownstreamClientManager : IAsyncDisposable
     protected readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<DownstreamClientManager> _logger;
     protected readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly AuditLog _audit;
 
     public DownstreamClientManager(
         IOptions<List<DownstreamServerOptions>> configs,
         ILoggerFactory loggerFactory,
-        IHttpContextAccessor httpContextAccessor)
+        IHttpContextAccessor httpContextAccessor,
+        AuditLog audit)
     {
         _configs = configs.Value.Where(c => c.Enabled && !string.IsNullOrWhiteSpace(c.BaseUrl)).ToList();
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<DownstreamClientManager>();
         _httpContextAccessor = httpContextAccessor;
+        _audit = audit;
     }
 
     public async Task<McpClient?> GetOrCreateClientAsync(string prefix, CancellationToken cancellationToken = default)
@@ -116,7 +120,8 @@ public class DownstreamClientManager : IAsyncDisposable
                 obo.TenantId, obo.ClientId, obo.ClientSecret, obo.TargetScope,
                 oboLogger,
                 discoveryScope: obo.DiscoveryScope,
-                tokenEndpointBaseUrl: obo.TokenEndpointBaseUrl);
+                tokenEndpointBaseUrl: obo.TokenEndpointBaseUrl,
+                audit: _audit);
 
             return new HttpClient(handler, disposeHandler: true)
             {

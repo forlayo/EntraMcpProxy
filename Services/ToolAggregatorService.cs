@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using EntraMcpProxy.Auth;
+using EntraMcpProxy.Infrastructure;
 
 namespace EntraMcpProxy.Services;
 
@@ -12,19 +13,22 @@ public class ToolAggregatorService : BackgroundService
     private readonly ToolPolicyService _toolPolicy;
     private readonly IConfiguration _configuration;
     private readonly ILogger<ToolAggregatorService> _logger;
+    private readonly AuditLog _audit;
 
     public ToolAggregatorService(
         DownstreamClientManager clientManager,
         ToolRegistry toolRegistry,
         ToolPolicyService toolPolicy,
         IConfiguration configuration,
-        ILogger<ToolAggregatorService> logger)
+        ILogger<ToolAggregatorService> logger,
+        AuditLog audit)
     {
         _clientManager = clientManager;
         _toolRegistry = toolRegistry;
         _toolPolicy = toolPolicy;
         _configuration = configuration;
         _logger = logger;
+        _audit = audit;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -114,12 +118,7 @@ public class ToolAggregatorService : BackgroundService
 
                 if (added.Count > 0 || removed.Count > 0 || descChanged.Count > 0)
                 {
-                    _logger.LogInformation(
-                        "ToolSet diff for '{Name}': added=[{Added}] removed=[{Removed}] descChanged=[{Changed}]",
-                        config.Name,
-                        string.Join(",", added),
-                        string.Join(",", removed),
-                        string.Join(",", descChanged));
+                    _audit.ToolSetChanged(config.Prefix, added, removed, descChanged);
                 }
 
                 _toolRegistry.RegisterTools(config.Prefix, sanitized);
