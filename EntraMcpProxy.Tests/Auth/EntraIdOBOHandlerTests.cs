@@ -242,6 +242,111 @@ public class EntraIdOBOHandlerTests
         downstream.LastAuthHeader.Should().Contain("sp-discovery-token");
     }
 
+    [Fact]
+    public async Task Same_handler_two_users_produces_two_exchanges_with_distinct_assertions()
+    {
+        // The C1-closure proof: a single EntraIdOBOHandler instance, simulating the
+        // production "singleton per downstream" architecture, is hit twice by two
+        // different users via an IHttpContextAccessor that returns different
+        // ClaimsPrincipals on consecutive calls. The FakeTokenHandler must record
+        // TWO POSTs whose 'assertion' field values are the respective user tokens —
+        // alice-token in POST 1, bob-token in POST 2.
+        //
+        // If the old GetHashCode()-keyed cache were still in place, a 32-bit
+        // collision could return user A's OBO token to user B; with OboCacheKey-keyed
+        // cache, two distinct oid claims guarantee two distinct cache entries and
+        // therefore two distinct token exchanges.
+
+        // Build two HttpContext instances — one per user.
+        var aliceClaims = new List<Claim>
+        {
+            new("oid", "alice-oid"),
+            new("tid", "tenant"),
+        };
+        var aliceCtx = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(aliceClaims, "test")),
+        };
+        aliceCtx.Request.Headers.Authorization = "Bearer alice-token";
+
+        var bobClaims = new List<Claim>
+        {
+            new("oid", "bob-oid"),
+            new("tid", "tenant"),
+        };
+        var bobCtx = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(bobClaims, "test")),
+        };
+        bobCtx.Request.Headers.Authorization = "Bearer bob-token";
+
+        // Single accessor whose HttpContext property returns a different context on
+        // each access, simulating two sequential incoming requests.
+        // The handler accesses HttpContext twice per SendAsync call (once for the
+        // bearer header, once for the ClaimsPrincipal), so each context must be
+        // enqueued twice.
+        var contexts = new Queue<HttpContext>();
+        contexts.Enqueue(aliceCtx);  // GetIncomingBearerToken
+        contexts.Enqueue(aliceCtx);  // BuildCacheKey
+        contexts.Enqueue(bobCtx);    // GetIncomingBearerToken
+        contexts.Enqueue(bobCtx);    // BuildCacheKey
+        var accessor = Substitute.For<IHttpContextAccessor>();
+        accessor.HttpContext.Returns(_ => contexts.Dequeue());
+
+        // FakeTokenHandler always succeeds — we inspect the assertion field later.
+        var tokenFake = new FakeTokenHandler();
+        tokenFake.SetResponse("obo-token", expiresIn: 600);
+
+        var downstream = new FakeDownstreamHandler();
+
+        // Single handler instance — production "singleton per downstream" model.
+        using var handler = new EntraIdOBOHandler(
+            accessor,
+            tenantId:     "tenant",
+            clientId:     "client",
+            clientSecret: "secret",
+            targetScope:  "api://x/.default",
+            logger:       NullLogger<EntraIdOBOHandler>.Instance,
+            tokenHandler: tokenFake,
+            innerHandler: downstream);
+
+        using var invoker = new HttpMessageInvoker(handler, disposeHandler: false);
+
+        await invoker.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, "https://downstream.test/probe"),
+            CancellationToken.None);
+        await invoker.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, "https://downstream.test/probe"),
+            CancellationToken.None);
+
+        // C1 closure assertion: a single handler must NOT collapse alice and bob into
+        // one cache entry — two separate OBO exchanges must have occurred.
+        tokenFake.Received.Should().HaveCount(2,
+            "single handler instance must produce two distinct OBO exchanges for two distinct users");
+
+        var assertion1 = await ReadFormField(tokenFake.Received[0], "assertion");
+        var assertion2 = await ReadFormField(tokenFake.Received[1], "assertion");
+        assertion1.Should().Be("alice-token",
+            "POST 1 must carry alice's incoming bearer as the OBO assertion");
+        assertion2.Should().Be("bob-token",
+            "POST 2 must carry bob's incoming bearer as the OBO assertion");
+    }
+
+    // Extracts a single URL-encoded form field from an HttpRequestMessage body.
+    private static async Task<string?> ReadFormField(HttpRequestMessage req, string name)
+    {
+        var body = await req.Content!.ReadAsStringAsync();
+        foreach (var kvp in body.Split('&'))
+        {
+            var eq = kvp.IndexOf('=');
+            if (eq <= 0) continue;
+            var k = System.Net.WebUtility.UrlDecode(kvp[..eq]);
+            if (k != name) continue;
+            return System.Net.WebUtility.UrlDecode(kvp[(eq + 1)..]);
+        }
+        return null;
+    }
+
     // ── fake handlers ─────────────────────────────────────────────────────────
 
     /// <summary>
