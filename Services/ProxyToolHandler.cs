@@ -1,3 +1,5 @@
+using EntraMcpProxy.Configuration;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -8,15 +10,18 @@ public class ProxyToolHandler
 {
     private readonly ToolRegistry _toolRegistry;
     private readonly DownstreamClientManager _clientManager;
+    private readonly ToolResultWrapper _wrapper;
     private readonly ILogger<ProxyToolHandler> _logger;
 
     public ProxyToolHandler(
         ToolRegistry toolRegistry,
         DownstreamClientManager clientManager,
+        ToolResultWrapper wrapper,
         ILogger<ProxyToolHandler> logger)
     {
         _toolRegistry = toolRegistry;
         _clientManager = clientManager;
+        _wrapper = wrapper;
         _logger = logger;
     }
 
@@ -60,10 +65,11 @@ public class ProxyToolHandler
 
             if (result.IsError == true)
             {
+                // N17 (Phase 12 will fully scrub content from logs): log only the block
+                // count — never the content itself (it may contain PII or attacker payloads).
                 _logger.LogWarning(
-                    "Downstream '{Prefix}':'{Tool}' returned isError=true. Content: {Content}",
-                    entry.Prefix, entry.OriginalName,
-                    string.Join(" | ", result.Content.Select(c => c.ToString())));
+                    "Downstream '{Prefix}':'{Tool}' returned isError=true. ContentBlocks={Count}",
+                    entry.Prefix, entry.OriginalName, result.Content.Count);
             }
             else
             {
@@ -72,7 +78,8 @@ public class ProxyToolHandler
                     entry.Prefix, entry.OriginalName, result.Content.Count);
             }
 
-            return result;
+            // N11 + N12: wrap each text block in provenance tags; enforce size cap.
+            return _wrapper.Wrap(result, entry.Prefix, entry.OriginalName);
         }
         catch (Exception ex)
         {
