@@ -212,3 +212,6 @@ app.Use(async (context, next) =>
 
 app.MapMcp();
 app.Run();
+
+// Marker for Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>.
+public partial class Program { }
