@@ -173,8 +173,17 @@ builder.Services.AddCors(options =>
         // when no origins are configured for the request.)
     }));
 
+// N19: Runtime egress allowlist enforcement (defense-in-depth complement to the
+// startup validator in Task 3.3).
+builder.Services.AddSingleton<EgressAllowlist>();
+builder.Services.AddTransient<EgressEnforcingHandler>();
+
 // M9: Use named HttpClient for the /token relay to Entra, managed by IHttpClientFactory.
-builder.Services.AddHttpClient("entra-token-relay");
+// N19: EgressEnforcingHandler is added here so the /token relay is also subject to
+// the allowlist check at send time (login.microsoftonline.com is always implicitly
+// permitted, so this does not break the normal OAuth flow).
+builder.Services.AddHttpClient("entra-token-relay")
+    .AddHttpMessageHandler<EgressEnforcingHandler>();
 
 // M10: Per-IP fixed-window rate limit on the OAuth facade endpoints.
 builder.Services.AddRateLimiter(options =>

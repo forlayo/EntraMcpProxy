@@ -66,6 +66,14 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
     ///   Optional inner handler for the base <see cref="DelegatingHandler"/>
     ///   pipeline (downstream calls). Leave <c>null</c> in production.
     /// </param>
+    /// <param name="egressEnforcer">
+    ///   Optional <see cref="EgressEnforcingHandler"/> that wraps both the
+    ///   downstream pipeline and the token-endpoint client. When non-null,
+    ///   every outbound HTTP request (OBO downstream call + token exchange)
+    ///   is checked against <see cref="EgressAllowlist"/> at send time.
+    ///   Leave <c>null</c> in unit tests that supply their own stubs.
+    ///   N19 runtime defense-in-depth.
+    /// </param>
     public EntraIdOBOHandler(
         IHttpContextAccessor httpContextAccessor,
         string tenantId,
@@ -77,8 +85,9 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
         HttpMessageHandler? innerHandler = null,
         string? discoveryScope = null,
         string? tokenEndpointBaseUrl = null,
-        AuditLog? audit = null)
-        : base(innerHandler ?? new HttpClientHandler())
+        AuditLog? audit = null,
+        EgressEnforcingHandler? egressEnforcer = null)
+        : base(WrapEgress(innerHandler ?? new HttpClientHandler(), egressEnforcer))
     {
         _httpContextAccessor = httpContextAccessor;
         _tenantId = tenantId;
@@ -360,6 +369,22 @@ public sealed class EntraIdOBOHandler : DelegatingHandler, IDisposable
     /// </summary>
     internal DateTimeOffset? GetCacheExpiry(OboCacheKey key) =>
         _oboCache.TryGetValue(key, out var entry) ? entry.Expires : null;
+
+    // ── egress wrapping (N19) ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Wraps <paramref name="inner"/> with the egress enforcer when one is
+    /// provided. Each call to the constructor gets a fresh
+    /// <see cref="EgressEnforcingHandler"/> instance (DelegatingHandler keeps
+    /// an InnerHandler reference and is not shareable).
+    /// </summary>
+    private static HttpMessageHandler WrapEgress(
+        HttpMessageHandler inner, EgressEnforcingHandler? enforcer)
+    {
+        if (enforcer is null) return inner;
+        enforcer.InnerHandler = inner;
+        return enforcer;
+    }
 
     // ── lifecycle ─────────────────────────────────────────────────────────────
 

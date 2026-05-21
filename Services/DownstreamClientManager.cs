@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol.Client;
 using EntraMcpProxy.Auth;
@@ -15,18 +16,21 @@ public class DownstreamClientManager : IAsyncDisposable
     private readonly ILogger<DownstreamClientManager> _logger;
     protected readonly IHttpContextAccessor _httpContextAccessor;
     private readonly AuditLog _audit;
+    private readonly IServiceProvider _serviceProvider;
 
     public DownstreamClientManager(
         IOptions<List<DownstreamServerOptions>> configs,
         ILoggerFactory loggerFactory,
         IHttpContextAccessor httpContextAccessor,
-        AuditLog audit)
+        AuditLog audit,
+        IServiceProvider serviceProvider)
     {
         _configs = configs.Value.Where(c => c.Enabled && !string.IsNullOrWhiteSpace(c.BaseUrl)).ToList();
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<DownstreamClientManager>();
         _httpContextAccessor = httpContextAccessor;
         _audit = audit;
+        _serviceProvider = serviceProvider;
     }
 
     public async Task<McpClient?> GetOrCreateClientAsync(string prefix, CancellationToken cancellationToken = default)
@@ -115,13 +119,20 @@ public class DownstreamClientManager : IAsyncDisposable
                     $"Downstream '{config.Name}' uses OBOToken auth but has no OBO config.");
 
             var oboLogger = _loggerFactory.CreateLogger<EntraIdOBOHandler>();
+
+            // N19: resolve a fresh EgressEnforcingHandler for each OBO handler
+            // (DelegatingHandler stores an InnerHandler reference; it must not be
+            // shared between multiple consumers).
+            var egressEnforcer = _serviceProvider.GetRequiredService<EgressEnforcingHandler>();
+
             var handler = new EntraIdOBOHandler(
                 _httpContextAccessor,
                 obo.TenantId, obo.ClientId, obo.ClientSecret, obo.TargetScope,
                 oboLogger,
                 discoveryScope: obo.DiscoveryScope,
                 tokenEndpointBaseUrl: obo.TokenEndpointBaseUrl,
-                audit: _audit);
+                audit: _audit,
+                egressEnforcer: egressEnforcer);
 
             return new HttpClient(handler, disposeHandler: true)
             {
