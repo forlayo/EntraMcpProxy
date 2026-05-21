@@ -11,10 +11,12 @@
 // Entra ID configuration (EntraId:Authority, EntraId:ClientId, EntraId:TenantId) is required.
 // The application will throw on startup if any of these values are missing.
 
+using System;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using EntraMcpProxy.Auth;
 using EntraMcpProxy.Configuration;
 using EntraMcpProxy.Infrastructure;
@@ -56,27 +58,67 @@ var entraClientId  = builder.Configuration["EntraId:ClientId"]  ?? "";
 var entraTenantId  = builder.Configuration["EntraId:TenantId"]  ?? "";
 
 // --- Authentication (Entra ID JWT — required) ---
+//
+// NOTE: JwtBearerOptions MUST be configured via IConfigureOptions<> with IConfiguration
+// injected at runtime rather than capturing builder.Configuration values at registration
+// time.  When WebApplicationFactory overrides configuration (e.g. to point at FakeEntra
+// for integration tests), builder.Configuration is not yet updated with the override at
+// the moment AddJwtBearer runs — the DI-resolved IConfiguration IS correct at first use.
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddJwtBearer(options =>
+    .AddJwtBearer();
+
+// Configure JwtBearerOptions via DI-resolved IConfiguration so WebApplicationFactory
+// config overrides (EntraId:Authority / TenantId / ClientId) take effect in tests.
+builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .Configure<IConfiguration>((options, config) =>
     {
-        options.Authority = entraAuthority;
-        options.RequireHttpsMetadata = builder.Configuration.GetValue("EntraId:RequireHttpsMetadata", true);
-        options.TokenValidationParameters.ValidateAudience = true;
-        options.TokenValidationParameters.ValidAudiences = new[]
+        var authority = config["EntraId:Authority"] ?? "";
+        var clientId  = config["EntraId:ClientId"]  ?? "";
+        var tenantId  = config["EntraId:TenantId"]  ?? "";
+
+        options.Authority = authority;
+        options.RequireHttpsMetadata = config.GetValue("EntraId:RequireHttpsMetadata", true);
+
+        // Phase 7 prerequisite: do not rewrite "oid" → long Microsoft URI.
+        // EntraIdOBOHandler (Phase 7) keys the OBO cache on User.FindFirst("oid").
+        // With the default MapInboundClaims=true, JwtBearerHandler rewrites "oid"
+        // to the long URI before populating ClaimsPrincipal, so FindFirst("oid")
+        // returns null in production while tests using MapInboundClaims=false pass.
+        options.MapInboundClaims = false;
+
+        // N13/L17: every TokenValidationParameters flag set explicitly — a future
+        // maintainer cannot silently weaken validation without removing a named line.
+        var p = options.TokenValidationParameters;
+        p.ValidateIssuer           = true;
+        p.ValidateAudience         = true;
+        p.ValidateLifetime         = true;
+        p.ValidateIssuerSigningKey = true;
+        p.RequireSignedTokens      = true;
+        p.RequireExpirationTime    = true;
+        p.SaveSigninToken          = false;
+        p.ClockSkew                = TimeSpan.FromMinutes(2);
+
+        p.ValidAudiences = new[]
         {
-            entraClientId,
-            $"api://{entraClientId}",
+            clientId,
+            $"api://{clientId}",
         };
+
         // Accept both v1.0 (sts.windows.net) and v2.0 issuers — access tokens for
         // custom API scopes (api://...) are issued as v1.0 even via the v2.0 endpoint.
-        options.TokenValidationParameters.ValidIssuers = new[]
+        // authority is explicitly included so FakeEntra integration tests validate
+        // cleanly against the dynamic WireMock URL (and to make the mapping explicit in
+        // production even though it is a subset of the two login.microsoftonline.com entries).
+        p.ValidIssuers = new[]
         {
-            $"https://sts.windows.net/{entraTenantId}/",
-            $"https://login.microsoftonline.com/{entraTenantId}/v2.0",
-            $"https://login.microsoftonline.com/{entraTenantId}/",
+            $"https://sts.windows.net/{tenantId}/",
+            $"https://login.microsoftonline.com/{tenantId}/v2.0",
+            $"https://login.microsoftonline.com/{tenantId}/",
+            authority, // explicit: covers FakeEntra in tests; in prod same as v2.0 entry above
         };
     });
+
 builder.Services.AddAuthorization();
 
 builder.Services.AddHttpContextAccessor();
