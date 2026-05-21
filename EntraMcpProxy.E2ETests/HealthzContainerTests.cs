@@ -6,6 +6,7 @@ using Xunit;
 
 namespace EntraMcpProxy.E2ETests;
 
+[Collection("E2E")]
 public class HealthzContainerTests
 {
     [Fact]
