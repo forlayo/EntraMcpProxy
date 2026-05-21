@@ -12,7 +12,6 @@
 // The application will throw on startup if any of these values are missing.
 
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.Options;
 using EntraMcpProxy.Auth;
 using EntraMcpProxy.Configuration;
@@ -134,15 +133,6 @@ if (app.Environment.IsProduction())
             "Set it to true, or run with a non-Production ASPNETCORE_ENVIRONMENT.");
     }
 }
-
-// Trust X-Forwarded-Proto/Host from ingress (e.g. AKS terminates TLS, forwards http internally)
-var forwardedOptions = new ForwardedHeadersOptions
-{
-    ForwardedHeaders = ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost
-};
-forwardedOptions.KnownIPNetworks.Clear();
-forwardedOptions.KnownProxies.Clear();
-app.UseForwardedHeaders(forwardedOptions);
 
 app.UseExceptionHandler();
 app.UseCors();
