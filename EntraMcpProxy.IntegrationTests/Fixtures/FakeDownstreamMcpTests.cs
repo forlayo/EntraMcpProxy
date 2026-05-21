@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -73,8 +74,7 @@ public class FakeDownstreamMcpTests
     public async Task ToolsList_returns_custom_tools_when_reconfigured()
     {
         await using var dn = new FakeDownstreamMcp();
-        dn.Tools.Clear();
-        dn.Tools.Add(new FakeTool("custom_tool", "Custom description.", """{"type":"object"}"""));
+        dn.SetTools(new FakeTool("custom_tool", "Custom description.", """{"type":"object"}"""));
 
         using var http = new HttpClient();
         var resp = await http.PostAsync(dn.Url,
@@ -84,5 +84,34 @@ public class FakeDownstreamMcpTests
         string body = await resp.Content.ReadAsStringAsync();
         body.Should().Contain("\"custom_tool\"");
         body.Should().NotContain("\"ping\"");
+    }
+
+    [Fact]
+    public async Task Records_concurrent_requests_from_multiple_threads()
+    {
+        await using var dn = new FakeDownstreamMcp();
+        const int Threads = 16, PerThread = 5;
+        using var http = new HttpClient();
+
+        var tasks = Enumerable.Range(0, Threads).Select(t => Task.Run(async () =>
+        {
+            for (int i = 0; i < PerThread; i++)
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Post, dn.Url)
+                {
+                    Content = new StringContent(
+                        """{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}""",
+                        Encoding.UTF8, "application/json"),
+                };
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", $"user-{t}");
+                (await http.SendAsync(req)).IsSuccessStatusCode.Should().BeTrue();
+            }
+        })).ToArray();
+
+        await Task.WhenAll(tasks);
+
+        var calls = dn.RecordedCalls;                  // snapshot — must be stable
+        calls.Should().HaveCount(Threads * PerThread);  // 80
+        calls.Select(c => c.Authorization).Distinct().Should().HaveCount(Threads);
     }
 }

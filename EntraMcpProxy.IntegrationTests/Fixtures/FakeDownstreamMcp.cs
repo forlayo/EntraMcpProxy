@@ -38,25 +38,55 @@ public sealed class FakeDownstreamMcp : IAsyncDisposable
 
     /// <summary>
     /// Every HTTP request received by the fixture, in arrival order.
-    /// Thread-safe: appended under <c>_recordLock</c>.
+    /// Returns a snapshot taken under the recording lock — safe to read from
+    /// any thread, including while concurrent requests are still arriving.
     /// </summary>
-    public IReadOnlyList<RecordedCall> RecordedCalls => _recorded;
+    public IReadOnlyList<RecordedCall> RecordedCalls
+    {
+        get
+        {
+            lock (_recordLock)
+            {
+                return _recorded.ToArray();
+            }
+        }
+    }
     private readonly List<RecordedCall> _recorded = new();
     private readonly object _recordLock = new();
 
-    /// <summary>
-    /// Tools advertised by the "tools/list" response. Mutable so individual
-    /// tests can rewrite the catalog before exercising the proxy. The list is
-    /// read at request-serve time (not at setup time), so mutations made after
-    /// construction are reflected in responses.
-    /// </summary>
-    public List<FakeTool> Tools { get; } = new()
+    private readonly List<FakeTool> _tools = new()
     {
         new FakeTool(
             Name: "ping",
             Description: "Returns pong.",
             InputSchema: """{"type":"object","properties":{},"required":[]}"""),
     };
+    private readonly object _toolsLock = new();
+
+    /// <summary>Snapshot of the currently advertised tool catalog.</summary>
+    public IReadOnlyList<FakeTool> Tools
+    {
+        get { lock (_toolsLock) { return _tools.ToArray(); } }
+    }
+
+    public void SetTools(params FakeTool[] tools)
+    {
+        lock (_toolsLock)
+        {
+            _tools.Clear();
+            _tools.AddRange(tools);
+        }
+    }
+
+    public void ClearTools()
+    {
+        lock (_toolsLock) { _tools.Clear(); }
+    }
+
+    public void AddTool(FakeTool tool)
+    {
+        lock (_toolsLock) { _tools.Add(tool); }
+    }
 
     public FakeDownstreamMcp()
     {
@@ -104,11 +134,13 @@ public sealed class FakeDownstreamMcp : IAsyncDisposable
                 .WithBodyAsJson(req =>
                 {
                     Record(req, "tools/list");
+                    FakeTool[] toolsSnapshot;
+                    lock (_toolsLock) { toolsSnapshot = _tools.ToArray(); }
                     return new
                     {
                         jsonrpc = "2.0",
                         id      = TryExtractId(req.Body),
-                        result  = new { tools = Tools },
+                        result  = new { tools = toolsSnapshot },
                     };
                 }));
 
