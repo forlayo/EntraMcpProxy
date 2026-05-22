@@ -86,10 +86,11 @@ done
 [[ -z "$TENANT_ID" ]]     && fail "--tenant-id is required"
 [[ -z "$CLIENT_ID" ]]     && fail "--client-id is required"
 [[ -z "$CLIENT_SECRET" ]] && fail "--client-secret is required" \
-    "This proxy's Entra app is a confidential client (publicClient: false),
-    so the device-code /token poll MUST include a client_secret. The same
-    secret is wired into the proxy as 'EntraId__ClientSecret'
-    (typically stored in the Key Vault attached to the Container App)."
+    "Pass the same client_secret you generated on the Entra app registration.
+    In this proxy's IaC it is wired to the Container App as
+    'DownstreamServers__0__OBO__ClientSecret', sourced from the Key Vault
+    secret 'obo-client-secret'. Retrieve it with:
+      az keyvault secret show --vault-name <kv> --name obo-client-secret --query value -o tsv"
 [[ -z "$PROXY_URL" ]]     && fail "--proxy-url is required"
 
 # Verify dependencies
@@ -363,12 +364,28 @@ while true; do
             mark_fail "Entra device-code auth" "invalid_client"
             err_desc=$(echo "$poll_body" | jq -r '.error_description // ""')
             if echo "$err_desc" | grep -q "AADSTS7000218"; then
-                fail "Token poll failed: client_secret required (AADSTS7000218)." \
-                     "The Entra app is a confidential client (publicClient: false), so the
-    device code /token poll must include a client_secret. Re-run with:
-      ./test-mcp.sh ... --client-secret <secret>
-    The secret is the same one wired into the proxy (Container App env var
-    'EntraId__ClientSecret' / Key Vault reference)."
+                fail "Token poll failed: Entra reports client_secret missing (AADSTS7000218)." \
+                     "The script DID include --client-secret on the wire, so this error
+    means the secret never reached Entra. Possible causes:
+      - Corporate proxy / VPN stripping the POST body
+      - Custom curl alias or wrapper filtering args
+      - Stale local copy of test-mcp.sh — verify with:
+          git log --oneline -1 -- iac/test/test-mcp.sh
+        should show commit 513d405 (or later)
+    Sanity-check the wire by hitting Entra directly:
+      curl -s -X POST https://login.microsoftonline.com/<tenant>/oauth2/v2.0/token \\
+        -H 'Content-Type: application/x-www-form-urlencoded' \\
+        --data-urlencode grant_type=urn:ietf:params:oauth:grant-type:device_code \\
+        --data-urlencode device_code=fake \\
+        --data-urlencode client_id=<client-id> \\
+        --data-urlencode client_secret=<secret>
+    If that returns AADSTS7000014 (invalid device_code) Entra accepted the
+    secret. If it returns AADSTS7000218 something upstream of Entra is
+    mangling the request."
+            elif echo "$err_desc" | grep -qE "AADSTS7000215|AADSTS7000222"; then
+                fail "Token poll failed: client_secret invalid or expired." \
+                     "Check the secret value matches what is configured on the Entra app
+    registration today (rotated secrets must be refreshed in Key Vault)."
             else
                 fail "Token request failed (invalid_client): $err_desc"
             fi
