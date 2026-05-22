@@ -8,25 +8,23 @@
 #
 # Usage:
 #   ./test-mcp.sh \
-#       --tenant-id  <guid> \
-#       --client-id  <guid> \
-#       --proxy-url  https://aca-entra-mcp-proxy-devel.whitemoss-f4f610a7.northeurope.azurecontainerapps.io
+#       --tenant-id     <guid> \
+#       --client-id     <guid> \
+#       --client-secret <secret> \
+#       --proxy-url     https://aca-entra-mcp-proxy-devel.whitemoss-f4f610a7.northeurope.azurecontainerapps.io
 #
-#   # If the Entra app is a confidential client (publicClient: false — the default
-#   # for this proxy), the device code /token poll requires a client secret:
+#   # The proxy's Entra app is a confidential client (publicClient: false),
+#   # so the device-code /token poll requires the same client_secret that the
+#   # proxy uses (EntraId__ClientSecret env var, typically from Key Vault).
+#
+#   # Specific tool with arguments:
 #   ./test-mcp.sh \
 #       --tenant-id     <guid> \
 #       --client-id     <guid> \
 #       --client-secret <secret> \
-#       --proxy-url     https://...
-#
-#   # Specific tool with arguments:
-#   ./test-mcp.sh \
-#       --tenant-id  <guid> \
-#       --client-id  <guid> \
-#       --proxy-url  https://... \
-#       --tool-name  azdevops__list_projects \
-#       --tool-args  '{}'
+#       --proxy-url     https://... \
+#       --tool-name     azdevops__list_projects \
+#       --tool-args     '{}'
 
 set -euo pipefail
 
@@ -78,16 +76,21 @@ while [[ $# -gt 0 ]]; do
         --tool-args)     TOOL_ARGS="$2";     shift 2 ;;
         *)
             printf "${RED}Unknown parameter: %s${RESET}\n" "$1"
-            printf "Usage: %s --tenant-id <guid> --client-id <guid> [--client-secret <secret>] --proxy-url <url> [--tool-name <name>] [--tool-args '{}']\n" "$0"
+            printf "Usage: %s --tenant-id <guid> --client-id <guid> --client-secret <secret> --proxy-url <url> [--tool-name <name>] [--tool-args '{}']\n" "$0"
             exit 1
             ;;
     esac
 done
 
 # Validate required parameters
-[[ -z "$TENANT_ID" ]] && fail "--tenant-id is required"
-[[ -z "$CLIENT_ID" ]] && fail "--client-id is required"
-[[ -z "$PROXY_URL" ]] && fail "--proxy-url is required"
+[[ -z "$TENANT_ID" ]]     && fail "--tenant-id is required"
+[[ -z "$CLIENT_ID" ]]     && fail "--client-id is required"
+[[ -z "$CLIENT_SECRET" ]] && fail "--client-secret is required" \
+    "This proxy's Entra app is a confidential client (publicClient: false),
+    so the device-code /token poll MUST include a client_secret. The same
+    secret is wired into the proxy as 'EntraId__ClientSecret'
+    (typically stored in the Key Vault attached to the Container App)."
+[[ -z "$PROXY_URL" ]]     && fail "--proxy-url is required"
 
 # Verify dependencies
 for cmd in curl jq; do
@@ -320,22 +323,15 @@ while true; do
     now=$(date +%s)
     auth_elapsed=$(( now - auth_start ))
 
-    # Confidential clients (publicClient: false) must include client_secret on the
-    # /token poll — Entra returns AADSTS7000218 otherwise. The /devicecode call
-    # itself never requires the secret.
-    poll_args=(
-        --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code"
-        --data-urlencode "device_code=$DEVICE_CODE"
-        --data-urlencode "client_id=$CLIENT_ID"
-    )
-    if [[ -n "$CLIENT_SECRET" ]]; then
-        poll_args+=( --data-urlencode "client_secret=$CLIENT_SECRET" )
-    fi
-
+    # Confidential client poll — client_secret is mandatory (Entra returns
+    # AADSTS7000218 otherwise). The /devicecode call itself never needs it.
     poll_response=$(curl -s -w "\n%{http_code}" --max-time 30 \
         -X POST "$TOKEN_ENDPOINT" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        "${poll_args[@]}")
+        --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+        --data-urlencode "device_code=$DEVICE_CODE" \
+        --data-urlencode "client_id=$CLIENT_ID" \
+        --data-urlencode "client_secret=$CLIENT_SECRET")
 
     poll_status=$(echo "$poll_response" | tail -1)
     poll_body=$(echo "$poll_response" | sed '$d')
