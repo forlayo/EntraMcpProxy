@@ -91,3 +91,15 @@ param keyVaultName = '<your-keyvault-name>'
 // OBO target scope for Azure DevOps Remote MCP (default is the known resource GUID).
 // Only change this if Microsoft updates the Azure DevOps Remote MCP resource ID.
 // param oboTargetScope = '2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tools'
+
+// Identity used to pull the image from ACR. Two options:
+//   'system-environment' (DEFAULT) — use the ACA Environment's managed identity.
+//        Works out-of-the-box when the platform team has already granted
+//        AcrPull on the shared ACR to the environment's identity. This is the
+//        typical setup for org-wide shared ACRs (acrsharedservices*).
+//        Pre-requisite (verify with platform team): the ACA environment has
+//        a system-assigned identity, and that identity has AcrPull on the ACR.
+//   'system' — use THIS app's own system-assigned managed identity.
+//        Bicep will create the AcrPull role assignment on the ACR automatically.
+//        Only use this if you have Owner or User Access Administrator on the ACR.
+// param registryIdentityMode = 'system-environment'

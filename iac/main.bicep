@@ -86,6 +86,13 @@ param customPublicBaseUrl string = ''
 @description('OBO target scope for Azure DevOps Remote MCP.')
 param oboTargetScope string = '2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tools'
 
+@description('Identity to use when pulling the image from ACR. "system-environment" uses the ACA Environment\'s managed identity (typical when the ACR is shared across teams and only the platform team can grant AcrPull). "system" uses this app\'s own system-assigned identity (requires you to be Owner/User Access Administrator on the ACR so the Bicep can create the AcrPull role assignment).')
+@allowed([
+  'system-environment'
+  'system'
+])
+param registryIdentityMode string = 'system-environment'
+
 // ---------------------------------------------------------------------------
 // Variables — derived / hard-coded guardrails
 // ---------------------------------------------------------------------------
@@ -147,10 +154,15 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
     environmentId: acaEnv.id
     configuration: {
       // Pull image using managed identity — no registry username/password.
+      // 'system-environment' = use the ACA Environment's identity (default,
+      // works when AcrPull on the shared ACR is granted at env level by the
+      // platform team — typical for org-shared ACRs).
+      // 'system' = use this app's own system-assigned identity (only when the
+      // operator can grant AcrPull on the ACR themselves).
       registries: [
         {
           server: '${acrName}.azurecr.io'
-          identity: 'system'
+          identity: registryIdentityMode
         }
       ]
       // The OBO client secret is referenced from Key Vault via managed identity.
@@ -274,10 +286,14 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 }
 
 // ---------------------------------------------------------------------------
-// Role assignment: AcrPull — lets the app pull its own image without creds
+// Role assignment: AcrPull — only created when registryIdentityMode = 'system'
+// (i.e. this app pulls with its own identity). When using 'system-environment'
+// the AcrPull role is assumed already granted to the ACA Environment's
+// identity by the platform team — which is the typical pattern for shared
+// org-wide ACRs the deploying user may not have Owner permissions on.
 // ---------------------------------------------------------------------------
 
-resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (registryIdentityMode == 'system') {
   name: guid(acr.id, containerApp.id, acrPullRoleId)
   scope: acr
   properties: {
