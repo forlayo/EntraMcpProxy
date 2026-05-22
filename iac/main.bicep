@@ -131,7 +131,9 @@ var imageRef = '${acrName}.azurecr.io/${imageRepository}:${imageTag}'
 
 // RBAC role definition IDs (built-in, tenant-wide constants)
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
-var kvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e0'
+// Key Vault Secrets User — built-in role.
+// Reference: https://learn.microsoft.com/en-us/azure/role-based-access-control/built-in-roles/security#key-vault-secrets-user
+var kvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
 
 // Build the EgressAllowlist env vars dynamically from the array parameter.
 // Each entry becomes Proxy__EgressAllowlist__N=<host>
