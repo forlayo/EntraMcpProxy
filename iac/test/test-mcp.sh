@@ -97,23 +97,26 @@ elapsed_ms() {
 }
 
 # ── Summary tracking ───────────────────────────────────────────────────────────
+# NOTE: macOS ships bash 3.2 which lacks associative arrays. We use three
+# parallel indexed arrays instead (SUMMARY_KEYS[i] / SUMMARY_PASS[i] /
+# SUMMARY_DETAIL[i] share the same index).
 
-declare -a SUMMARY_KEYS=()
-declare -A SUMMARY_PASS=()
-declare -A SUMMARY_DETAIL=()
+SUMMARY_KEYS=()
+SUMMARY_PASS=()
+SUMMARY_DETAIL=()
 
 mark_pass() {
     local key="$1" detail="$2"
     SUMMARY_KEYS+=("$key")
-    SUMMARY_PASS["$key"]="true"
-    SUMMARY_DETAIL["$key"]="$detail"
+    SUMMARY_PASS+=("true")
+    SUMMARY_DETAIL+=("$detail")
 }
 
 mark_fail() {
     local key="$1" detail="$2"
     SUMMARY_KEYS+=("$key")
-    SUMMARY_PASS["$key"]="false"
-    SUMMARY_DETAIL["$key"]="$detail"
+    SUMMARY_PASS+=("false")
+    SUMMARY_DETAIL+=("$detail")
 }
 
 # ── Utility: parse MCP response (SSE or JSON) ─────────────────────────────────
@@ -682,9 +685,10 @@ printf "${CYAN} RESULT${RESET}\n"
 printf "${CYAN}═══════════════════════════════════════════════════════════════${RESET}\n"
 
 all_passed=true
-for key in "${SUMMARY_KEYS[@]}"; do
-    pass="${SUMMARY_PASS[$key]}"
-    detail="${SUMMARY_DETAIL[$key]}"
+for i in "${!SUMMARY_KEYS[@]}"; do
+    key="${SUMMARY_KEYS[$i]}"
+    pass="${SUMMARY_PASS[$i]}"
+    detail="${SUMMARY_DETAIL[$i]}"
     if [[ "$pass" == "true" ]]; then
         printf "${GREEN} [PASS] %-30s %s${RESET}\n" "$key" "$detail"
     else
