@@ -252,7 +252,7 @@ dc_response=$(curl -s -w "\n%{http_code}" --max-time 30 \
 t3_elapsed=$(( $(now_ms) - t3 ))
 
 dc_http_status=$(echo "$dc_response" | tail -1)
-dc_body=$(echo "$dc_response" | head -n -1)
+dc_body=$(echo "$dc_response" | sed '$d')
 
 if [[ "$dc_http_status" != "200" ]]; then
     err_code=$(echo "$dc_body" | jq -r '.error // "unknown"')
@@ -318,7 +318,7 @@ while true; do
         --data-urlencode "client_id=$CLIENT_ID")
 
     poll_status=$(echo "$poll_response" | tail -1)
-    poll_body=$(echo "$poll_response" | head -n -1)
+    poll_body=$(echo "$poll_response" | sed '$d')
     poll_err=$(echo "$poll_body" | jq -r '.error // empty')
 
     if [[ "$poll_status" == "200" ]] && [[ -z "$poll_err" ]]; then
@@ -418,7 +418,7 @@ init_headers=$(echo "$init_response" | awk '/^\r?$/{exit} {print}')
 init_body_raw=$(echo "$init_response" | awk 'found{print} /^\r?$/{found=1}')
 
 # Extract HTTP status
-init_http_status=$(echo "$init_headers" | head -1 | grep -oP '(?<=HTTP/\S+ )\d+' || echo "0")
+init_http_status=$(echo "$init_headers" | awk 'NR==1{print $2; exit}' | tr -d '\r')
 
 if [[ "$init_http_status" == "401" ]]; then
     mark_fail "MCP initialize" "HTTP 401"
@@ -523,7 +523,7 @@ fi
 
 list_headers=$(echo "$list_response" | awk '/^\r?$/{exit} {print}')
 list_body_raw=$(echo "$list_response" | awk 'found{print} /^\r?$/{found=1}')
-list_http_status=$(echo "$list_headers" | head -1 | grep -oP '(?<=HTTP/\S+ )\d+' || echo "0")
+list_http_status=$(echo "$list_headers" | awk 'NR==1{print $2; exit}' | tr -d '\r')
 
 if [[ "$list_http_status" != "200" ]]; then
     mark_fail "MCP tools/list" "HTTP $list_http_status"
@@ -648,7 +648,7 @@ if [[ -n "$SELECTED_TOOL" ]]; then
 
     call_headers=$(echo "$call_response" | awk '/^\r?$/{exit} {print}')
     call_body_raw=$(echo "$call_response" | awk 'found{print} /^\r?$/{found=1}')
-    call_http_status=$(echo "$call_headers" | head -1 | grep -oP '(?<=HTTP/\S+ )\d+' || echo "0")
+    call_http_status=$(echo "$call_headers" | awk 'NR==1{print $2; exit}' | tr -d '\r')
 
     if [[ "$call_http_status" == "401" ]]; then
         mark_fail "MCP tools/call" "HTTP 401"
