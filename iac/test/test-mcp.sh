@@ -12,6 +12,14 @@
 #       --client-id  <guid> \
 #       --proxy-url  https://aca-entra-mcp-proxy-devel.whitemoss-f4f610a7.northeurope.azurecontainerapps.io
 #
+#   # If the Entra app is a confidential client (publicClient: false — the default
+#   # for this proxy), the device code /token poll requires a client secret:
+#   ./test-mcp.sh \
+#       --tenant-id     <guid> \
+#       --client-id     <guid> \
+#       --client-secret <secret> \
+#       --proxy-url     https://...
+#
 #   # Specific tool with arguments:
 #   ./test-mcp.sh \
 #       --tenant-id  <guid> \
@@ -55,20 +63,22 @@ fail() {
 
 TENANT_ID=""
 CLIENT_ID=""
+CLIENT_SECRET=""
 PROXY_URL=""
 TOOL_NAME=""
 TOOL_ARGS="{}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --tenant-id)  TENANT_ID="$2";  shift 2 ;;
-        --client-id)  CLIENT_ID="$2";  shift 2 ;;
-        --proxy-url)  PROXY_URL="$2";  shift 2 ;;
-        --tool-name)  TOOL_NAME="$2";  shift 2 ;;
-        --tool-args)  TOOL_ARGS="$2";  shift 2 ;;
+        --tenant-id)     TENANT_ID="$2";     shift 2 ;;
+        --client-id)     CLIENT_ID="$2";     shift 2 ;;
+        --client-secret) CLIENT_SECRET="$2"; shift 2 ;;
+        --proxy-url)     PROXY_URL="$2";     shift 2 ;;
+        --tool-name)     TOOL_NAME="$2";     shift 2 ;;
+        --tool-args)     TOOL_ARGS="$2";     shift 2 ;;
         *)
             printf "${RED}Unknown parameter: %s${RESET}\n" "$1"
-            printf "Usage: %s --tenant-id <guid> --client-id <guid> --proxy-url <url> [--tool-name <name>] [--tool-args '{}']\n" "$0"
+            printf "Usage: %s --tenant-id <guid> --client-id <guid> [--client-secret <secret>] --proxy-url <url> [--tool-name <name>] [--tool-args '{}']\n" "$0"
             exit 1
             ;;
     esac
@@ -310,12 +320,22 @@ while true; do
     now=$(date +%s)
     auth_elapsed=$(( now - auth_start ))
 
+    # Confidential clients (publicClient: false) must include client_secret on the
+    # /token poll — Entra returns AADSTS7000218 otherwise. The /devicecode call
+    # itself never requires the secret.
+    poll_args=(
+        --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code"
+        --data-urlencode "device_code=$DEVICE_CODE"
+        --data-urlencode "client_id=$CLIENT_ID"
+    )
+    if [[ -n "$CLIENT_SECRET" ]]; then
+        poll_args+=( --data-urlencode "client_secret=$CLIENT_SECRET" )
+    fi
+
     poll_response=$(curl -s -w "\n%{http_code}" --max-time 30 \
         -X POST "$TOKEN_ENDPOINT" \
         -H "Content-Type: application/x-www-form-urlencoded" \
-        --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
-        --data-urlencode "device_code=$DEVICE_CODE" \
-        --data-urlencode "client_id=$CLIENT_ID")
+        "${poll_args[@]}")
 
     poll_status=$(echo "$poll_response" | tail -1)
     poll_body=$(echo "$poll_response" | sed '$d')
@@ -342,6 +362,20 @@ while true; do
             mark_fail "Entra device-code auth" "expired_token"
             fail "The device code expired before sign-in completed (ran for ${auth_elapsed}s)." \
                  "Re-run the script and complete sign-in within $EXPIRES_IN seconds."
+            ;;
+        "invalid_client")
+            mark_fail "Entra device-code auth" "invalid_client"
+            err_desc=$(echo "$poll_body" | jq -r '.error_description // ""')
+            if echo "$err_desc" | grep -q "AADSTS7000218"; then
+                fail "Token poll failed: client_secret required (AADSTS7000218)." \
+                     "The Entra app is a confidential client (publicClient: false), so the
+    device code /token poll must include a client_secret. Re-run with:
+      ./test-mcp.sh ... --client-secret <secret>
+    The secret is the same one wired into the proxy (Container App env var
+    'EntraId__ClientSecret' / Key Vault reference)."
+            else
+                fail "Token request failed (invalid_client): $err_desc"
+            fi
             ;;
         *)
             mark_fail "Entra device-code auth" "error=$poll_err"
