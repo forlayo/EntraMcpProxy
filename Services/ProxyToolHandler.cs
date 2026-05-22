@@ -16,6 +16,7 @@ public class ProxyToolHandler
 {
     private readonly ToolRegistry _toolRegistry;
     private readonly DownstreamClientManager _clientManager;
+    private readonly ToolAggregatorService _aggregator;
     private readonly ToolResultWrapper _wrapper;
     private readonly DownstreamAuthorizationFilter _authz;
     private readonly IHttpContextAccessor _httpContextAccessor;
@@ -25,6 +26,7 @@ public class ProxyToolHandler
     public ProxyToolHandler(
         ToolRegistry toolRegistry,
         DownstreamClientManager clientManager,
+        ToolAggregatorService aggregator,
         ToolResultWrapper wrapper,
         DownstreamAuthorizationFilter authz,
         IHttpContextAccessor httpContextAccessor,
@@ -33,6 +35,7 @@ public class ProxyToolHandler
     {
         _toolRegistry = toolRegistry;
         _clientManager = clientManager;
+        _aggregator = aggregator;
         _wrapper = wrapper;
         _authz = authz;
         _httpContextAccessor = httpContextAccessor;
@@ -40,18 +43,35 @@ public class ProxyToolHandler
         _audit = audit;
     }
 
-    public ValueTask<ListToolsResult> HandleListToolsAsync(
+    public async ValueTask<ListToolsResult> HandleListToolsAsync(
         RequestContext<ListToolsRequestParams> request,
         CancellationToken cancellationToken)
     {
         var user = _httpContextAccessor.HttpContext?.User
             ?? new ClaimsPrincipal(new ClaimsIdentity());
 
+        // First-authenticated-user-request discovery for OBO downstreams that
+        // don't have a DiscoveryScope. The background loop skips these; the
+        // OBO handler needs the user's bearer to exchange a downstream token.
+        if (user.Identity?.IsAuthenticated == true)
+        {
+            foreach (var config in _clientManager.GetConfigs())
+            {
+                if (!config.RequiresUserContext) continue;
+                if (_toolRegistry.HasToolsForPrefix(config.Prefix)) continue;
+
+                _logger.LogInformation(
+                    "Triggering lazy discovery for '{Name}' in user context",
+                    config.Name);
+                await _aggregator.RefreshToolsForPrefixAsync(config.Prefix, cancellationToken);
+            }
+        }
+
         var allTools = _toolRegistry.GetAllTools();
         var visible = allTools.Where(t => _authz.IsAllowed(user, t.Name)).ToList();
 
         _logger.LogDebug("ListTools: {Total} tools total, {Visible} visible to user", allTools.Count, visible.Count);
-        return new ValueTask<ListToolsResult>(new ListToolsResult { Tools = visible });
+        return new ListToolsResult { Tools = visible };
     }
 
     public async ValueTask<CallToolResult> HandleCallToolAsync(

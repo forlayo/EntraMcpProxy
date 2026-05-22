@@ -11,6 +11,9 @@ namespace EntraMcpProxy.Services;
 public class DownstreamClientManager : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, McpClient> _clients = new();
+    // Per-prefix lock to serialize concurrent connect attempts from request paths
+    // (e.g., two users hitting list_tools at cold start for a lazy downstream).
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectLocks = new();
     private readonly IReadOnlyList<DownstreamServerOptions> _configs;
     protected readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<DownstreamClientManager> _logger;
@@ -52,6 +55,15 @@ public class DownstreamClientManager : IAsyncDisposable
     {
         foreach (var config in _configs)
         {
+            if (config.RequiresUserContext)
+            {
+                _logger.LogInformation(
+                    "Skipping eager connect for downstream '{Name}' " +
+                    "(OBOToken without DiscoveryScope — will connect on first user request)",
+                    config.Name);
+                continue;
+            }
+
             try
             {
                 await ConnectAsync(config, cancellationToken);
@@ -77,27 +89,41 @@ public class DownstreamClientManager : IAsyncDisposable
 
     private async Task<McpClient> ConnectAsync(DownstreamServerOptions config, CancellationToken cancellationToken)
     {
-        var httpClient = CreateHttpClient(config);
-
-        var transportOptions = new HttpClientTransportOptions
+        // Serialize per-prefix so that two concurrent request paths hitting cold
+        // start for the same downstream do not both build (and leak) an McpClient.
+        var sem = _connectLocks.GetOrAdd(config.Prefix, _ => new SemaphoreSlim(1, 1));
+        await sem.WaitAsync(cancellationToken);
+        try
         {
-            Endpoint = new Uri(config.BaseUrl),
-        };
+            if (_clients.TryGetValue(config.Prefix, out var existing))
+                return existing;
 
-        var transport = new HttpClientTransport(transportOptions, httpClient, _loggerFactory, ownsHttpClient: true);
+            var httpClient = CreateHttpClient(config);
 
-        var clientOptions = new McpClientOptions
+            var transportOptions = new HttpClientTransportOptions
+            {
+                Endpoint = new Uri(config.BaseUrl),
+            };
+
+            var transport = new HttpClientTransport(transportOptions, httpClient, _loggerFactory, ownsHttpClient: true);
+
+            var clientOptions = new McpClientOptions
+            {
+                ClientInfo = new() { Name = "EntraMcpProxy", Version = "1.0.0" },
+            };
+
+            var client = await McpClient.CreateAsync(transport, clientOptions, _loggerFactory, cancellationToken);
+            _clients[config.Prefix] = client;
+
+            _logger.LogInformation(
+                "Connected to downstream '{Name}' at {BaseUrl} (auth: {AuthType})",
+                config.Name, config.BaseUrl, config.AuthType);
+            return client;
+        }
+        finally
         {
-            ClientInfo = new() { Name = "EntraMcpProxy", Version = "1.0.0" },
-        };
-
-        var client = await McpClient.CreateAsync(transport, clientOptions, _loggerFactory, cancellationToken);
-        _clients[config.Prefix] = client;
-
-        _logger.LogInformation(
-            "Connected to downstream '{Name}' at {BaseUrl} (auth: {AuthType})",
-            config.Name, config.BaseUrl, config.AuthType);
-        return client;
+            sem.Release();
+        }
     }
 
     protected virtual HttpClient CreateHttpClient(DownstreamServerOptions config)
@@ -173,5 +199,11 @@ public class DownstreamClientManager : IAsyncDisposable
             catch { /* best effort */ }
         }
         _clients.Clear();
+
+        foreach (var sem in _connectLocks.Values)
+        {
+            sem.Dispose();
+        }
+        _connectLocks.Clear();
     }
 }

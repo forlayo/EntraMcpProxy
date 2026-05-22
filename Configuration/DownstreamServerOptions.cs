@@ -29,6 +29,17 @@ public sealed record DownstreamServerOptions
     public int  TimeoutSeconds { get; init; } = 30;
 
     /// <summary>
+    /// True when this downstream cannot be background-discovered because no SP
+    /// discovery scope is configured. Such downstreams must be connected and
+    /// discovered lazily on the first authenticated user request, so the OBO
+    /// handler can exchange the user's bearer (the SP/client_credentials path
+    /// is unavailable — see <see cref="OboOptions.DiscoveryScope"/>).
+    /// </summary>
+    public bool RequiresUserContext =>
+        string.Equals(AuthType, "OBOToken", StringComparison.OrdinalIgnoreCase)
+        && string.IsNullOrWhiteSpace(OBO?.DiscoveryScope);
+
+    /// <summary>
     /// Optional allowlist of tool names (without the prefix) that this proxy
     /// will register. When set, any tool returned by the downstream that is
     /// NOT in this list is rejected at refresh time and logged. When null

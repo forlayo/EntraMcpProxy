@@ -139,7 +139,10 @@ builder.Services.AddSingleton<ToolResultWrapper>();
 builder.Services.AddSingleton<DownstreamAuthorizationFilter>();
 builder.Services.AddSingleton<AuditLog>();
 builder.Services.AddSingleton<ProxyToolHandler>();
-builder.Services.AddHostedService<ToolAggregatorService>();
+// Singleton + hosted: ProxyToolHandler injects the aggregator to trigger lazy
+// discovery on first authenticated list_tools (downstreams without DiscoveryScope).
+builder.Services.AddSingleton<ToolAggregatorService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<ToolAggregatorService>());
 
 // --- MCP Server with dynamic handlers ---
 builder.Services.AddMcpServer(options =>
