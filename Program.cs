@@ -520,7 +520,12 @@ app.Use(async (context, next) =>
 // N14: explicit auth requirement on every MCP route, in addition to the
 // custom middleware. Defense in depth — if the middleware ordering or
 // path-exemption list ever changes, MCP routes stay protected.
-app.MapMcp().RequireAuthorization();
+//
+// Mounted at /mcp explicitly: MapMcp() defaults to "" (root), but every
+// operator-facing doc (sandbox-validation, README rollout runbook,
+// test-mcp.sh) and the claude.ai connector URL pattern all assume /mcp.
+// Pinning the prefix keeps the actual route aligned with documentation.
+app.MapMcp("/mcp").RequireAuthorization();
 
 // Block B: Graceful shutdown hooks — log drain window boundaries.
 // HostOptions.ShutdownTimeout (30s, set above) gives in-flight requests
