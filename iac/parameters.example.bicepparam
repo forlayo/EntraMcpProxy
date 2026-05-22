@@ -97,9 +97,39 @@ param keyVaultName = '<your-keyvault-name>'
 //        Works out-of-the-box when the platform team has already granted
 //        AcrPull on the shared ACR to the environment's identity. This is the
 //        typical setup for org-wide shared ACRs (acrsharedservices*).
-//        Pre-requisite (verify with platform team): the ACA environment has
-//        a system-assigned identity, and that identity has AcrPull on the ACR.
 //   'system' — use THIS app's own system-assigned managed identity.
 //        Bicep will create the AcrPull role assignment on the ACR automatically.
 //        Only use this if you have Owner or User Access Administrator on the ACR.
 // param registryIdentityMode = 'system-environment'
+
+// =========================================================================
+// SECRET SOURCE — pick ONE
+// =========================================================================
+// How the OBO client_secret reaches the running container. Two options:
+//
+//   'KeyVault' (production-grade): the secret stays in Key Vault, the
+//      Container App references it at runtime via its managed identity.
+//      Requires `Key Vault Secrets User` on the KV — which the Bicep
+//      creates, but it has a RACE CONDITION on first deploy: RBAC
+//      propagation can take 1-2 min, and during that window the new
+//      revision tries to resolve the secret and fails. ACA marks the
+//      revision as Failed and keeps serving the previous one. To use
+//      this mode safely, either pre-create the role assignment manually
+//      (so it's propagated before the deploy), or run the deploy TWICE
+//      — the second run picks up where the first left off because RBAC
+//      has propagated by then.
+//
+//   'Direct' (simpler, no race): the secret value is passed as a @secure()
+//      parameter at deploy time and stored directly in the Container App
+//      secret. No KV dependency, no race condition. The secret value
+//      never appears in deployment logs (Azure scrubs @secure() params).
+//      Recommended for first deployments; switch to KeyVault once the
+//      platform side is stable.
+//
+// param secretSource = 'KeyVault'    // default; production-grade
+// param secretSource = 'Direct'      // simpler; required when RBAC race blocks deploy
+
+// REQUIRED when secretSource = 'Direct': the actual secret value.
+// Pass it via Azure DevOps pipeline variable, GitHub secret, or interactively
+// on the CLI — NEVER commit it to source control.
+// param oboClientSecretValue = '<the-real-secret-value>'

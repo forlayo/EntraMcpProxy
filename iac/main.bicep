@@ -93,6 +93,17 @@ param oboTargetScope string = '2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tool
 ])
 param registryIdentityMode string = 'system-environment'
 
+@description('How to source the OBO client secret. "KeyVault" (production-grade) references a secret stored in Key Vault — requires the app\'s system identity to have "Key Vault Secrets User" on the KV, AND for that RBAC to be propagated before the new revision starts (usually 1-2 min after the role assignment is created; race condition possible on first deploy). "Direct" (simpler, no race) takes the secret value as a @secure() parameter and stores it directly in the Container App secret — no KV dependency. Use Direct to unblock initial deployments; migrate to KeyVault once the platform team confirms the role assignment is in place.')
+@allowed([
+  'KeyVault'
+  'Direct'
+])
+param secretSource string = 'KeyVault'
+
+@description('OBO client secret value — required ONLY when secretSource = "Direct". Marked @secure() so it never appears in deployment logs or state. Leave empty when using KeyVault mode.')
+@secure()
+param oboClientSecretValue string = ''
+
 // ---------------------------------------------------------------------------
 // Variables — derived / hard-coded guardrails
 // ---------------------------------------------------------------------------
@@ -106,7 +117,10 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
   name: acrName
 }
 
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+// Key Vault is only resolved (and the role assignment created) when the
+// secretSource is 'KeyVault'. In 'Direct' mode keyVaultName can be left as
+// '<placeholder>' or any value — it's not dereferenced.
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = if (secretSource == 'KeyVault') {
   name: keyVaultName
 }
 
@@ -167,13 +181,19 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           identity: registryIdentityMode
         }
       ]
-      // The OBO client secret is referenced from Key Vault via managed identity.
-      // It is NEVER stored as a literal value in this template.
-      secrets: [
+      // The OBO client secret can be sourced either from Key Vault (production,
+      // requires propagated RBAC) or stored directly as a @secure() parameter
+      // value (simpler, no KV race). See `secretSource` parameter.
+      secrets: secretSource == 'KeyVault' ? [
         {
           name: 'obo-client-secret'
           keyVaultUrl: '${keyVault.properties.vaultUri}secrets/${clientSecretSecretName}'
           identity: 'system'
+        }
+      ] : [
+        {
+          name: 'obo-client-secret'
+          value: oboClientSecretValue
         }
       ]
       ingress: {
@@ -309,7 +329,7 @@ resource acrPullAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' 
 // Role assignment: Key Vault Secrets User — lets the app read the client secret
 // ---------------------------------------------------------------------------
 
-resource kvSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource kvSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (secretSource == 'KeyVault') {
   name: guid(keyVault.id, containerApp.id, kvSecretsUserRoleId)
   scope: keyVault
   properties: {
