@@ -4,9 +4,14 @@
 // Minimum-input philosophy: supply only deployment-specific values.
 // Everything else is derived or has a safe default.
 //
-// Required parameters (6):
+// Required parameters (5, with secretSource='Direct' — the new default):
 //   containerAppsEnvironmentName, acrName, entraTenantId, entraClientId,
-//   azureDevOpsOrganization, keyVaultName
+//   azureDevOpsOrganization
+//   + @secure() oboClientSecretValue supplied at deploy time
+//
+// Set secretSource='KeyVault' if you have a fully-propagated 'Key Vault
+// Secrets User' role already in place and prefer to source the secret from
+// there. That mode also requires keyVaultName.
 // =============================================================================
 
 targetScope = 'resourceGroup'
@@ -34,8 +39,8 @@ param entraClientId string
 @description('Azure DevOps organisation name — the {org} in https://mcp.dev.azure.com/{org}.')
 param azureDevOpsOrganization string
 
-@description('Name of the existing Key Vault that holds the OBO client secret.')
-param keyVaultName string
+@description('Name of an existing Key Vault that holds the OBO client secret. Only consulted when secretSource = "KeyVault". When secretSource = "Direct" (the default) this can be left as a placeholder.')
+param keyVaultName string = '<not-used-in-Direct-mode>'
 
 // ---------------------------------------------------------------------------
 // Optional parameters with safe defaults
@@ -93,14 +98,14 @@ param oboTargetScope string = '2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tool
 ])
 param registryIdentityMode string = 'system-environment'
 
-@description('How to source the OBO client secret. "KeyVault" (production-grade) references a secret stored in Key Vault — requires the app\'s system identity to have "Key Vault Secrets User" on the KV, AND for that RBAC to be propagated before the new revision starts (usually 1-2 min after the role assignment is created; race condition possible on first deploy). "Direct" (simpler, no race) takes the secret value as a @secure() parameter and stores it directly in the Container App secret — no KV dependency. Use Direct to unblock initial deployments; migrate to KeyVault once the platform team confirms the role assignment is in place.')
+@description('How to source the OBO client secret. "Direct" (default, simpler) takes the secret value as a @secure() parameter and stores it directly in the Container App secret — no Key Vault dependency, no RBAC race condition. "KeyVault" (production-grade) references a secret stored in Key Vault, requiring the Container App\'s system identity to have "Key Vault Secrets User" on the KV; this avoids embedding the secret in the deployment but introduces a 1-2 min RBAC propagation window that can fail the first revision. Stick with Direct unless you have a hardened secret rotation pipeline that operates against Key Vault.')
 @allowed([
-  'KeyVault'
   'Direct'
+  'KeyVault'
 ])
-param secretSource string = 'KeyVault'
+param secretSource string = 'Direct'
 
-@description('OBO client secret value — required ONLY when secretSource = "Direct". Marked @secure() so it never appears in deployment logs or state. Leave empty when using KeyVault mode.')
+@description('OBO client secret value — required when secretSource = "Direct" (the default). Marked @secure() so it never appears in deployment logs or state. Leave empty only when switching to KeyVault mode. The value printed by iac/setup-entra-app.sh goes here.')
 @secure()
 param oboClientSecretValue string = ''
 
@@ -359,4 +364,4 @@ output oauthDiscoveryUrl string = 'https://${containerApp.properties.configurati
 output healthzUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}/api/healthz'
 
 @description('Operator next-steps message.')
-output nextStepsMessage string = '=== DEPLOYMENT COMPLETE — NEXT STEPS ===\n\n1. VERIFY HEALTH\n   curl https://${containerApp.properties.configuration.ingress.fqdn}/api/healthz\n   Expected: HTTP 200 { "status": "Healthy" }\n\n2. UPDATE ENTRA APP REGISTRATION (if not already done)\n   In your Entra app registration, ensure the Web Redirect URI is EXACTLY:\n     https://claude.ai/api/mcp/auth_callback\n   (no trailing slash, no extra URIs)\n\n3. CONFIRM CLIENT SECRET IS IN KEY VAULT\n   The secret named "${clientSecretSecretName}" must exist in Key Vault "${keyVaultName}".\n   The Container App reads it via managed identity — no manual copy needed after rotation.\n\n4. CONNECT CLAUDE.AI\n   Go to claude.ai -> Settings -> Integrations -> Add integration\n   Set the MCP Server URL to:\n     https://${containerApp.properties.configuration.ingress.fqdn}\n   Users will authenticate with their Entra account on first use.\n\n5. RUN SANDBOX VALIDATION\n   Follow docs/sandbox-validation.md to verify end-to-end scenarios.\n'
+output nextStepsMessage string = '=== DEPLOYMENT COMPLETE — NEXT STEPS ===\n\n1. VERIFY HEALTH\n   curl https://${containerApp.properties.configuration.ingress.fqdn}/api/healthz\n   Expected: HTTP 200 { "status": "Healthy" }\n\n2. CONFIRM THE ENTRA APP IS WIRED CORRECTLY\n   If you ran iac/setup-entra-app.sh|ps1 these are already done. Otherwise:\n     - Web redirect URI:       https://claude.ai/api/mcp/auth_callback\n     - isFallbackPublicClient: true  (needed for the device-code test script)\n     - Exposed scope:          user_impersonation under api://<client-id>\n     - Delegated permission:   Ado.Mcp.Tools on resource 2a72489c-...-67ca6975798\n     - Admin consent:          granted\n\n3. CONNECT CLAUDE.AI\n   claude.ai -> Settings -> Integrations -> Add integration\n     Integration URL: https://${containerApp.properties.configuration.ingress.fqdn}/mcp\n     Client ID:       <entraClientId>\n     Client Secret:   <the same secret you supplied at deploy time>\n   Complete the OAuth flow with an Entra user. tools/list on first use will\n   lazy-discover Azure DevOps tools in the user\\\'s context.\n\n4. SMOKE TEST WITH THE BUILT-IN SCRIPT\n   bash iac/test/test-mcp.sh \\\n     --tenant-id <tenant> --client-id <client> --client-secret <secret> \\\n     --proxy-url https://${containerApp.properties.configuration.ingress.fqdn}\n\n5. RUN FULL SANDBOX VALIDATION (optional)\n   Follow docs/sandbox-validation.md for the full compatibility + security probes.\n'

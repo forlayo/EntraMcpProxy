@@ -218,7 +218,15 @@ All keys are **required**. The application will throw on startup if any are miss
 
 ## Entra ID Setup
 
-One-time configuration in the Azure portal (or Azure CLI / Terraform).
+### The easy way — one command
+
+```bash
+bash iac/setup-entra-app.sh     # or:  pwsh iac/setup-entra-app.ps1
+```
+
+This idempotent script does every step below — creates the app registration, exposes `user_impersonation`, adds the `Ado.Mcp.Tools` delegated permission, grants admin consent, mints a 2-year client secret, and (critically) sets `isFallbackPublicClient: true` so the smoke test's device-code grant can authenticate. It prints a ready-to-paste block for `iac/parameters.bicepparam`. **Use this unless you have a specific reason to provision by hand.**
+
+The remaining sub-sections document the same configuration manually, in case your tenant policy requires portal-based registration or you need to audit what the script does.
 
 ### Step 1 — Register the Application
 
@@ -229,13 +237,17 @@ In **Microsoft Entra ID → App registrations**, create a new registration:
 
 Note the **Application (client) ID** and **Directory (tenant) ID**.
 
-### Step 2 — Create a Client Secret
+### Step 2 — Enable "Allow public client flows"
+
+In the new app's **Authentication** blade, scroll to *Advanced settings* and set **Allow public client flows** to **Yes** (Graph property `isFallbackPublicClient: true`). The app remains a confidential client for the proxy's authorization-code and OBO flows; this flag *additionally* permits the device-code grant the smoke script uses. Without it, the smoke script fails post-sign-in with `AADSTS7000218` even when a valid `client_secret` is sent — see [docs/changes/2026-05-22-stabilization.md §3](docs/changes/2026-05-22-stabilization.md) for the analysis.
+
+### Step 3 — Create a Client Secret
 
 Under **Certificates & secrets → New client secret**. Copy the value immediately.
 
-This secret is used both by the proxy (to perform OBO exchanges) and by Claude Web (as `client_secret` in the token request). Store it in Azure Key Vault or a Kubernetes Secret — never in source control.
+This secret is used both by the proxy (to perform OBO exchanges) and by Claude Web (as `client_secret` in the token request). Store it in Azure Key Vault, a CI secret, or your password manager — never in source control.
 
-### Step 3 — Expose an API Scope
+### Step 4 — Expose an API Scope
 
 Under **Expose an API**:
 
@@ -243,7 +255,7 @@ Under **Expose an API**:
 2. Add a scope named `user_impersonation`
    - Who can consent: Admins and users
 
-### Step 4 — Grant Permission for Azure DevOps Remote MCP
+### Step 5 — Grant Permission for Azure DevOps Remote MCP
 
 Under **API permissions → Add a permission → APIs my organization uses**, find:
 
@@ -252,7 +264,7 @@ Under **API permissions → Add a permission → APIs my organization uses**, fi
 
 Click **Grant admin consent**. Required once. Without this, OBO exchange fails with `AADSTS65001`.
 
-### Step 5 — Add Users to Azure DevOps
+### Step 6 — Add Users to Azure DevOps
 
 Users must exist in the Azure DevOps organization at `https://dev.azure.com/{org}/_settings/users`.
 
@@ -262,11 +274,11 @@ Users must exist in the Azure DevOps organization at `https://dev.azure.com/{org
 |---|---|
 | `EntraId:TenantId` | Directory (tenant) ID |
 | `EntraId:ClientId` | Application (client) ID |
-| `OBO:ClientSecret` | Client secret from Step 2 (via env var or Key Vault) |
+| `OBO:ClientSecret` | Client secret from Step 3 (via env var or Key Vault) |
 | `OBO:TargetScope` | `2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tools` |
 | Claude Web `client_id` | Application (client) ID |
-| Claude Web `client_secret` | Client secret from Step 2 |
-| Claude Web MCP URL | `https://{your-proxy-domain}` |
+| Claude Web `client_secret` | Client secret from Step 3 |
+| Claude Web MCP URL | `https://{your-proxy-domain}/mcp` |
 
 ---
 

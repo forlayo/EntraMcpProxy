@@ -119,13 +119,24 @@ az ad app update \
   --web-redirect-uris "https://claude.ai/api/mcp/auth_callback"
 ```
 
-Disable public client flows (must be false for server-side OAuth):
+**Enable "Allow public client flows"** — set `isFallbackPublicClient=true`. This is
+*orthogonal* to `publicClient` (which we leave false). Setting it does NOT weaken
+the proxy's confidential authorization-code / OBO flows; it only additionally
+permits the device-code grant that `iac/test/test-mcp.sh` uses for end-to-end
+verification. Without it, the smoke script fails post-sign-in with
+`AADSTS7000218` even when a valid `client_secret` is supplied — see
+[docs/changes/2026-05-22-stabilization.md §3](changes/2026-05-22-stabilization.md)
+for the analysis.
 
 ```bash
 az ad app update \
   --id "$APP_OBJECT_ID" \
-  --set isFallbackPublicClient=false
+  --set isFallbackPublicClient=true
 ```
+
+(Or simpler: run `bash iac/setup-entra-app.sh` / `pwsh iac/setup-entra-app.ps1`
+once and skip every manual `az ad app update` in this section — the script
+configures the app registration exactly as documented here.)
 
 ### Step 1.6 — Grant Azure DevOps delegated permissions
 
@@ -356,9 +367,11 @@ Smoke-test as in Step 2.7, substituting `$PROXY_FQDN` for the ngrok hostname.
 
 ### Step 3.2 — Add the proxy as a custom integration
 
-- **Integration URL**: `https://$PROXY_FQDN/mcp` (replace `$PROXY_FQDN` literally)
-- Leave the auth fields blank for now — claude.ai will discover them via the
-  `/.well-known/oauth-authorization-server` endpoint.
+- **Integration URL**: `https://$PROXY_FQDN/mcp` (replace `$PROXY_FQDN` literally — the `/mcp` suffix is required; `Program.cs` registers the MCP routes via `MapMcp("/mcp")`)
+- **Client ID**: your `entraClientId`
+- **Client Secret**: the same secret value you supplied to the IaC at deploy time (printed once by `iac/setup-entra-app.sh|.ps1`)
+
+You **must** fill the client ID and secret. The proxy does not advertise a `registration_endpoint` in its OAuth discovery document, so claude.ai cannot fall back to Dynamic Client Registration — it needs static credentials. The proxy's `/token` endpoint is a transparent relay to Entra ([`Program.cs:435-476`](../Program.cs)), so the credentials you provide here are what Entra evaluates.
 
 Click **Save** (or **Add**).
 
@@ -379,9 +392,11 @@ Start a new claude.ai conversation and type:
 
 > "What tools do you have available from the MCP integration?"
 
-Expected: Claude lists tools served by the Azure DevOps Remote MCP (e.g.
-`ado_list_repos`, `ado_get_work_items`). If it says it has no tools, check Part 2
-Step 2.7 and the container logs.
+Expected: Claude lists tools served by the Azure DevOps Remote MCP (e.g. `azdevops__list_projects`, `azdevops__list_repos`).
+
+**On first-use latency:** the first authenticated `tools/list` triggers lazy discovery against Azure DevOps in the calling user's context (the background loop cannot do this — Azure DevOps Remote MCP is user-delegated only). The first interaction has an extra round-trip; subsequent calls hit the cached registry and return instantly. See [docs/changes/2026-05-22-stabilization.md §1](changes/2026-05-22-stabilization.md) for the architecture.
+
+If Claude reports no tools after the first interaction, check Part 2 Step 2.7 and the container logs.
 
 ---
 
