@@ -43,8 +43,16 @@ param keyVaultName = '<your-keyvault-name>'
 // OPTIONAL — safe defaults are pre-set; uncomment to override
 // ---------------------------------------------------------------------------
 
-// Container App resource name (default: 'entra-mcp-proxy')
+// Container App resource name (default: 'entra-mcp-proxy').
+// Set this to the existing app's name if you already created the ACA app
+// — Bicep will UPDATE that app rather than creating a new one.
 // param appName = 'entra-mcp-proxy'
+
+// Image repository inside ACR — the value between '<acr>.azurecr.io/' and ':<tag>'.
+// This is what you pushed with `docker push`; it is NOT the Container App's name.
+// Example: if you pushed `acrsharedservicesglobal01.azurecr.io/entra-mcp-proxy:1.0.0`,
+// the repository is `entra-mcp-proxy` (the default).
+// param imageRepository = 'entra-mcp-proxy'
 
 // Image tag to deploy (default: '1.0.0')
 // param imageTag = '1.0.0'

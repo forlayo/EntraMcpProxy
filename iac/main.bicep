@@ -44,6 +44,9 @@ param keyVaultName string
 @description('Name of the Container App resource.')
 param appName string = 'entra-mcp-proxy'
 
+@description('Image repository name inside the ACR — i.e. the value AFTER `<acr>.azurecr.io/` and BEFORE the colon. This is what you pushed with docker tag/push; it is NOT necessarily the same as the Container App name. Defaults to "entra-mcp-proxy".')
+param imageRepository string = 'entra-mcp-proxy'
+
 @description('Image tag to deploy.')
 param imageTag string = '1.0.0'
 
@@ -107,11 +110,17 @@ var publicBaseUrl = empty(customPublicBaseUrl)
   ? 'https://${derivedFqdn}'
   : customPublicBaseUrl
 
-// Authority — hard-coded pattern, tenant injected from parameter.
-var entraAuthority = 'https://login.microsoftonline.com/${entraTenantId}/v2.0'
+// Authority — multi-cloud safe (uses Azure environment's login endpoint).
+// In Azure public cloud this resolves to https://login.microsoftonline.com/.
+#disable-next-line no-hardcoded-env-urls
+var entraAuthority = '${environment().authentication.loginEndpoint}${entraTenantId}/v2.0'
 
-// Full image reference
-var imageRef = '${acrName}.azurecr.io/${appName}:${imageTag}'
+// Full image reference. The repository name (between the registry host and
+// the tag) is the imageRepository PARAMETER — NOT the Container App's name.
+// Decoupled because the image is pushed once to ACR under a stable repo name
+// (e.g. "entra-mcp-proxy") and reused across multiple app instances that may
+// have any name ("aca-entra-mcp-proxy-devel", "aca-entra-mcp-proxy-prod", …).
+var imageRef = '${acrName}.azurecr.io/${imageRepository}:${imageTag}'
 
 // RBAC role definition IDs (built-in, tenant-wide constants)
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
