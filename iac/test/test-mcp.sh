@@ -88,11 +88,32 @@ PROXY_URL="${PROXY_URL%/}"   # strip trailing slash
 
 # ── Timing helpers ─────────────────────────────────────────────────────────────
 
-SCRIPT_START=$(date +%s%3N 2>/dev/null || date +%s)
+# ── Portable millisecond timestamp ────────────────────────────────────────────
+# GNU date supports %N for nanoseconds; BSD date (macOS default) does NOT —
+# it silently returns the literal "%3N" / "%N" without erroring, breaking
+# arithmetic. Use perl (always present on macOS), then python3, then fall back
+# to seconds-only.
+now_ms() {
+    if command -v perl >/dev/null 2>&1; then
+        perl -MTime::HiRes=time -e 'printf("%d\n", time() * 1000)'
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import time; print(int(time.time()*1000))'
+    elif command -v gdate >/dev/null 2>&1; then
+        gdate +%s%3N
+    elif date +%s%3N 2>/dev/null | grep -qE '^[0-9]+$'; then
+        # GNU date (Linux). On BSD date the output contains "N", failing this check.
+        date +%s%3N
+    else
+        # Worst-case fallback: second precision multiplied by 1000.
+        echo "$(date +%s)000"
+    fi
+}
+
+SCRIPT_START=$(now_ms)
 
 elapsed_ms() {
     local now
-    now=$(date +%s%3N 2>/dev/null || echo 0)
+    now=$(now_ms)
     echo $((now - SCRIPT_START))
 }
 
@@ -153,29 +174,61 @@ decode_jwt_payload() {
 
 step "1" "Pre-flight checks"
 
-# 1a. Health check
-t1=$(date +%s%3N 2>/dev/null || echo 0)
-health_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "$PROXY_URL/api/healthz")
-t1_elapsed=$(( $(date +%s%3N 2>/dev/null || echo 0) - t1 ))
+# 1a. Health check — validate BOTH status and body shape. A wrong container
+# behind the same URL (e.g. an echo server) may return 200 for everything;
+# only the EntraMcpProxy returns the documented JSON shape.
+t1=$(now_ms)
+health_response=$(curl -s -w "\n%{http_code}" --max-time 15 "$PROXY_URL/api/healthz")
+t1_elapsed=$(( $(now_ms) - t1 ))
+health_status=$(echo "$health_response" | tail -1)
+health_body=$(echo "$health_response" | sed '$d')
 
 if [[ "$health_status" != "200" ]]; then
     mark_fail "Proxy healthz" "HTTP $health_status"
     fail "Healthz returned $health_status" "Check the proxy is deployed and the container app is running."
 fi
-green "  [OK] /api/healthz → 200 (${t1_elapsed}ms)"
-mark_pass "Proxy healthz" "200 OK"
+
+# The EntraMcpProxy /api/healthz returns { "status": "Healthy", "timestamp": "..." }.
+# If the body doesn't have a "status" field set to "Healthy", we're talking to
+# the wrong container (e.g. a previous revision, or a debug echo server) — fail
+# loudly instead of letting later steps fail with confusing errors.
+if ! echo "$health_body" | jq -e '.status == "Healthy"' &>/dev/null; then
+    mark_fail "Proxy healthz" "wrong body shape — not the proxy"
+    red   "  Healthz returned 200 but the body is not the proxy's documented JSON shape."
+    red   "  Expected: {\"status\":\"Healthy\",\"timestamp\":\"...\"}"
+    red   "  Got:"
+    echo "$health_body" | head -c 500
+    printf "\n\n"
+    fail "Something other than EntraMcpProxy is serving traffic on this URL." \
+         "Likely causes:
+    (1) The Bicep deploy succeeded but the new revision with the proxy image
+        failed to start, and ACA is still serving traffic from an older
+        revision (a previous Node.js / echo container). Check:
+          az containerapp revision list -n <app> -g <rg> -o table
+        Look for the latest revision being inactive / unhealthy and an older
+        one carrying 100% of the traffic.
+    (2) The container image you pushed is not actually EntraMcpProxy.
+    (3) An ingress / sidecar is intercepting before the app handler."
+fi
+green "  [OK] /api/healthz → 200 + valid body (${t1_elapsed}ms)"
+mark_pass "Proxy healthz" "200 OK, body OK"
 
 # 1b. OAuth discovery doc
-t2=$(date +%s%3N 2>/dev/null || echo 0)
+t2=$(now_ms)
 discovery_body=$(curl -s --max-time 15 "$PROXY_URL/.well-known/openid-configuration") || \
     fail "Could not fetch OAuth discovery doc"
-t2_elapsed=$(( $(date +%s%3N 2>/dev/null || echo 0) - t2 ))
+t2_elapsed=$(( $(now_ms) - t2 ))
 
 expected_scope="api://$CLIENT_ID/user_impersonation"
 if ! echo "$discovery_body" | jq -e --arg s "$expected_scope" '.scopes_supported | index($s) != null' &>/dev/null; then
     mark_fail "OAuth discovery doc" "scope '$expected_scope' not in scopes_supported"
+    red   "  Discovery doc body (first 500 bytes):"
+    echo "$discovery_body" | head -c 500
+    printf "\n\n"
     fail "Discovery doc does not advertise scope '$expected_scope'." \
-         "Verify --client-id is correct and the proxy was deployed with the right EntraId:ClientId."
+         "Verify --client-id is correct and the proxy was deployed with the right
+    EntraId:ClientId. If the body looks like raw request info / Node.js env vars,
+    you are talking to the wrong container — see Step 1a hints."
 fi
 green "  [OK] /.well-known/openid-configuration → scope '$expected_scope' present (${t2_elapsed}ms)"
 mark_pass "OAuth discovery doc" "scope present"
@@ -190,13 +243,13 @@ SCOPE="api://$CLIENT_ID/user_impersonation offline_access openid profile"
 DEVICE_CODE_ENDPOINT="https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/devicecode"
 TOKEN_ENDPOINT="https://login.microsoftonline.com/$TENANT_ID/oauth2/v2.0/token"
 
-t3=$(date +%s%3N 2>/dev/null || echo 0)
+t3=$(now_ms)
 dc_response=$(curl -s -w "\n%{http_code}" --max-time 30 \
     -X POST "$DEVICE_CODE_ENDPOINT" \
     -H "Content-Type: application/x-www-form-urlencoded" \
     --data-urlencode "client_id=$CLIENT_ID" \
     --data-urlencode "scope=$SCOPE")
-t3_elapsed=$(( $(date +%s%3N 2>/dev/null || echo 0) - t3 ))
+t3_elapsed=$(( $(now_ms) - t3 ))
 
 dc_http_status=$(echo "$dc_response" | tail -1)
 dc_body=$(echo "$dc_response" | head -n -1)
@@ -343,7 +396,7 @@ init_body=$(jq -cn \
     --arg pv "$PROTOCOL_VER" \
     '{jsonrpc:"2.0",id:1,method:"initialize",params:{protocolVersion:$pv,capabilities:{},clientInfo:{name:"test-mcp-script",version:"1.0.0"}}}')
 
-t4=$(date +%s%3N 2>/dev/null || echo 0)
+t4=$(now_ms)
 init_response=$(curl -s -D - --max-time 30 \
     -X POST "$MCP_URL" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -352,7 +405,7 @@ init_response=$(curl -s -D - --max-time 30 \
     -H "MCP-Protocol-Version: $PROTOCOL_VER" \
     -d "$init_body")
 init_curl_exit=$?
-t4_elapsed=$(( $(date +%s%3N 2>/dev/null || echo 0) - t4 ))
+t4_elapsed=$(( $(now_ms) - t4 ))
 
 if [[ $init_curl_exit -ne 0 ]]; then
     mark_fail "MCP initialize" "curl error $init_curl_exit"
@@ -424,7 +477,7 @@ step "4" "Send notifications/initialized"
 
 notif_body='{"jsonrpc":"2.0","method":"notifications/initialized"}'
 
-t5=$(date +%s%3N 2>/dev/null || echo 0)
+t5=$(now_ms)
 notif_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
     -X POST "$MCP_URL" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -433,7 +486,7 @@ notif_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
     -H "Mcp-Session-Id: $SESSION_ID" \
     -H "MCP-Protocol-Version: $PROTOCOL_VER" \
     -d "$notif_body" 2>/dev/null) || notif_status="0"
-t5_elapsed=$(( $(date +%s%3N 2>/dev/null || echo 0) - t5 ))
+t5_elapsed=$(( $(now_ms) - t5 ))
 
 if [[ "$notif_status" == "202" ]] || [[ "$notif_status" == "200" ]]; then
     green "  [OK] notifications/initialized → $notif_status (${t5_elapsed}ms)"
@@ -451,7 +504,7 @@ step "5" "tools/list"
 
 list_body='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 
-t6=$(date +%s%3N 2>/dev/null || echo 0)
+t6=$(now_ms)
 list_response=$(curl -s -D - --max-time 30 \
     -X POST "$MCP_URL" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -461,7 +514,7 @@ list_response=$(curl -s -D - --max-time 30 \
     -H "MCP-Protocol-Version: $PROTOCOL_VER" \
     -d "$list_body")
 list_curl_exit=$?
-t6_elapsed=$(( $(date +%s%3N 2>/dev/null || echo 0) - t6 ))
+t6_elapsed=$(( $(now_ms) - t6 ))
 
 if [[ $list_curl_exit -ne 0 ]]; then
     mark_fail "MCP tools/list" "curl error $list_curl_exit"
@@ -541,7 +594,11 @@ else
     if [[ -t 0 ]]; then
         # Interactive terminal
         printf "\n  Available tools:\n"
-        mapfile -t tool_names < <(echo "$list_json" | jq -r '.result.tools[].name')
+        # bash 3.2-compatible: use `while read` instead of `mapfile -t` (bash 4+).
+        tool_names=()
+        while IFS= read -r _line; do
+            tool_names+=("$_line")
+        done < <(echo "$list_json" | jq -r '.result.tools[].name')
         printf "\n"
         PS3="  Pick a tool [1-${#tool_names[@]}] (default 1): "
         select choice in "${tool_names[@]}"; do
@@ -572,7 +629,7 @@ if [[ -n "$SELECTED_TOOL" ]]; then
         --argjson args "$TOOL_ARGS" \
         '{jsonrpc:"2.0",id:3,method:"tools/call",params:{name:$name,arguments:$args}}')
 
-    t7=$(date +%s%3N 2>/dev/null || echo 0)
+    t7=$(now_ms)
     call_response=$(curl -s -D - --max-time 60 \
         -X POST "$MCP_URL" \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -582,7 +639,7 @@ if [[ -n "$SELECTED_TOOL" ]]; then
         -H "MCP-Protocol-Version: $PROTOCOL_VER" \
         -d "$call_body")
     call_curl_exit=$?
-    t7_elapsed=$(( $(date +%s%3N 2>/dev/null || echo 0) - t7 ))
+    t7_elapsed=$(( $(now_ms) - t7 ))
 
     if [[ $call_curl_exit -ne 0 ]]; then
         mark_fail "MCP tools/call" "curl error $call_curl_exit"
@@ -660,12 +717,12 @@ fi
 
 step "7" "DELETE session"
 
-t8=$(date +%s%3N 2>/dev/null || echo 0)
+t8=$(now_ms)
 del_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
     -X DELETE "$MCP_URL" \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H "Mcp-Session-Id: $SESSION_ID" 2>/dev/null) || del_status="0"
-t8_elapsed=$(( $(date +%s%3N 2>/dev/null || echo 0) - t8 ))
+t8_elapsed=$(( $(now_ms) - t8 ))
 
 if [[ "$del_status" == "200" ]] || [[ "$del_status" == "204" ]]; then
     green "  [OK] DELETE session → $del_status (${t8_elapsed}ms)"
