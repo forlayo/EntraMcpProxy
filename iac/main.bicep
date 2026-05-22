@@ -200,7 +200,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: true
         transport: 'http'
         allowInsecure: false       // HTTPS-only — hard guardrail
-        targetPort: 80
+        targetPort: 8080
         traffic: [
           {
             weight: 100
@@ -226,7 +226,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             // --- Hard-coded guardrails ---
             [
               { name: 'ASPNETCORE_ENVIRONMENT',        value: 'Production' }        // locked
-              { name: 'ASPNETCORE_URLS',               value: 'http://+:80' }       // Kestrel HTTP; ACA terminates TLS
+              { name: 'ASPNETCORE_URLS',               value: 'http://+:8080' }     // Port 8080: the .NET 8+ aspnet base image runs as a non-root user that cannot bind to privileged ports (<1024) on Linux. ACA strips CAP_NET_BIND_SERVICE. ACA terminates TLS at ingress.
               { name: 'EntraId__RequireHttpsMetadata',  value: 'true' }             // locked — Phase 3 N18 startup guard
               // Derived from tenantId parameter
               { name: 'EntraId__Authority',            value: entraAuthority }
@@ -262,7 +262,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               type: 'Liveness'
               httpGet: {
                 path: '/api/healthz'
-                port: 80
+                port: 8080
               }
               initialDelaySeconds: 10
               periodSeconds: 30
@@ -271,7 +271,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               type: 'Readiness'
               httpGet: {
                 path: '/api/readyz'
-                port: 80
+                port: 8080
               }
               initialDelaySeconds: 5
               periodSeconds: 15
@@ -280,7 +280,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               type: 'Startup'
               httpGet: {
                 path: '/api/healthz'
-                port: 80
+                port: 8080
               }
               initialDelaySeconds: 5
               periodSeconds: 5
