@@ -19,7 +19,8 @@ jobs:
           dotnet-version: '10.0.x'
       - run: dotnet restore --locked-mode
       - run: dotnet build --no-restore --configuration Release -warnaserror
-      - run: dotnet test --no-build --configuration Release --logger trx --results-directory TestResults
+      - run: dotnet test EntraMcpProxy.Tests/EntraMcpProxy.Tests.csproj --no-build --configuration Release --logger trx --results-directory TestResults
+      - run: dotnet test EntraMcpProxy.IntegrationTests/EntraMcpProxy.IntegrationTests.csproj --no-build --configuration Release --logger trx --results-directory TestResults
       - name: Vulnerability scan
         run: |
           dotnet list package --vulnerable --include-transitive 2>&1 | tee vuln.txt
@@ -45,7 +46,7 @@ jobs:
           dotnet-version: '10.0.x'
       - run: dotnet restore --locked-mode
       - run: dotnet build --no-restore --configuration Release
-      - run: dotnet test EntraMcpProxy.E2ETests --no-build --configuration Release --logger trx --results-directory TestResults
+      - run: dotnet test EntraMcpProxy.E2ETests/EntraMcpProxy.E2ETests.csproj --no-build --configuration Release --logger trx --results-directory TestResults
       - uses: actions/upload-artifact@v4
         if: always()
         with:

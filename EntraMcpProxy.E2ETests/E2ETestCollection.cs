@@ -1,3 +1,4 @@
+using EntraMcpProxy.E2ETests.Fixtures;
 using Xunit;
 
 namespace EntraMcpProxy.E2ETests;
@@ -13,4 +14,4 @@ namespace EntraMcpProxy.E2ETests;
 /// and execute sequentially.
 /// </summary>
 [CollectionDefinition("E2E", DisableParallelization = true)]
-public sealed class E2ETestCollection { }
+public sealed class E2ETestCollection : ICollectionFixture<ProxyContainerFixture> { }

@@ -10,6 +10,7 @@ using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
 using DotNet.Testcontainers.Images;
 using DotNet.Testcontainers.Networks;
+using Xunit;
 
 namespace EntraMcpProxy.E2ETests.Fixtures;
 
@@ -31,7 +32,7 @@ namespace EntraMcpProxy.E2ETests.Fixtures;
 /// McpClient.CreateAsync can send its MCP initialize handshake to the downstream.
 /// Individual tests layer additional or more specific mappings on top.
 /// </summary>
-public sealed class ProxyContainerFixture : IAsyncDisposable
+public sealed class ProxyContainerFixture : IAsyncLifetime
 {
     private const string ProxyImage = "entra-mcp-proxy:e2e";
     // Pinned by digest for supply-chain hygiene. Tag '3.9.1' is preserved in the comment
@@ -60,9 +61,11 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
     public static async Task<ProxyContainerFixture> StartAsync()
     {
         var fx = new ProxyContainerFixture();
-        await fx.InitAsync();
+        await fx.InitializeAsync();
         return fx;
     }
+
+    public Task InitializeAsync() => InitAsync();
 
     private async Task InitAsync()
     {
@@ -350,7 +353,7 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
         resp.EnsureSuccessStatusCode();
     }
 
-    public async ValueTask DisposeAsync()
+    public async Task DisposeAsync()
     {
         Http?.Dispose();
         if (_proxy      is not null) await _proxy.DisposeAsync().ConfigureAwait(false);
