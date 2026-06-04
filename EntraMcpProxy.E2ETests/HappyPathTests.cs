@@ -43,6 +43,7 @@ public class HappyPathTests
 {
     private const string TenantId = ProxyContainerFixture.FakeTenantId;
     private const string ClientId = ProxyContainerFixture.FakeClientId;
+    private static readonly TimeSpan McpOperationTimeout = TimeSpan.FromSeconds(20);
 
     [Fact(Timeout = 180_000)]
     public async Task User_token_flows_through_OBO_exchange_to_downstream()
@@ -108,7 +109,11 @@ public class HappyPathTests
     {
         var proxyUri = fx.Http.BaseAddress!;
         var handler = new FixedBearerHandler(bearerToken, new HttpClientHandler());
-        var http = new HttpClient(handler, disposeHandler: true) { BaseAddress = proxyUri };
+        var http = new HttpClient(handler, disposeHandler: true)
+        {
+            BaseAddress = proxyUri,
+            Timeout = McpOperationTimeout,
+        };
 
         return await McpClient.CreateAsync(
             new HttpClientTransport(
@@ -119,7 +124,7 @@ public class HappyPathTests
             new McpClientOptions
             {
                 ClientInfo = new Implementation { Name = "e2e-test-client", Version = "0.0.0" },
-            });
+            }).WaitAsync(McpOperationTimeout);
     }
 
     /// <summary>
@@ -139,10 +144,18 @@ public class HappyPathTests
         {
             try
             {
-                await using var client = await CreateMcpClientAsync(fx, bearerToken);
-                var tools = await client.ListToolsAsync();
-                lastToolList = string.Join(", ", tools.Select(t => t.Name));
-                if (tools.Any(t => t.Name == toolName)) return;
+                var client = await CreateMcpClientAsync(fx, bearerToken);
+                try
+                {
+                    using var cts = new CancellationTokenSource(McpOperationTimeout);
+                    var tools = await client.ListToolsAsync(options: null, cancellationToken: cts.Token);
+                    lastToolList = string.Join(", ", tools.Select(t => t.Name));
+                    if (tools.Any(t => t.Name == toolName)) return;
+                }
+                finally
+                {
+                    await DisposeClientAsync(client);
+                }
             }
             catch (Exception ex)
             {
@@ -171,10 +184,32 @@ public class HappyPathTests
     private static async Task<IList<ContentBlock>> CallFakePingAsync(
         ProxyContainerFixture fx, string bearerToken)
     {
-        await using var client = await CreateMcpClientAsync(fx, bearerToken);
-        var result = await client.CallToolAsync(
-            new CallToolRequestParams { Name = "fake__ping", Arguments = null });
-        return result.Content;
+        var client = await CreateMcpClientAsync(fx, bearerToken);
+        try
+        {
+            using var cts = new CancellationTokenSource(McpOperationTimeout);
+            var result = await client.CallToolAsync(
+                new CallToolRequestParams { Name = "fake__ping", Arguments = null },
+                cancellationToken: cts.Token);
+            return result.Content;
+        }
+        finally
+        {
+            await DisposeClientAsync(client);
+        }
+    }
+
+    private static async Task DisposeClientAsync(McpClient client)
+    {
+        try
+        {
+            await client.DisposeAsync().AsTask().WaitAsync(McpOperationTimeout);
+        }
+        catch (TimeoutException)
+        {
+            // Best-effort cleanup only. The SDK sends a session DELETE on dispose;
+            // do not let a stalled cleanup request consume the whole E2E test timeout.
+        }
     }
 
     // ─── WireMock-Entra configuration ────────────────────────────────────────
@@ -312,8 +347,10 @@ public class HappyPathTests
     private static async Task PostMappingAsync(HttpClient http, object mapping)
     {
         var json = JsonSerializer.Serialize(mapping);
+        using var cts = new CancellationTokenSource(McpOperationTimeout);
         using var resp = await http.PostAsync("mappings",
-            new StringContent(json, Encoding.UTF8, "application/json"));
+            new StringContent(json, Encoding.UTF8, "application/json"),
+            cts.Token);
         resp.EnsureSuccessStatusCode();
     }
 
@@ -324,10 +361,11 @@ public class HappyPathTests
     /// </summary>
     private static async Task<string> GetWireMockRequestsAsync(string adminUrl)
     {
-        using var http = new HttpClient();
-        var resp = await http.GetAsync($"{adminUrl}/requests");
+        using var http = new HttpClient { Timeout = McpOperationTimeout };
+        using var cts = new CancellationTokenSource(McpOperationTimeout);
+        var resp = await http.GetAsync($"{adminUrl}/requests", cts.Token);
         resp.EnsureSuccessStatusCode();
-        return await resp.Content.ReadAsStringAsync();
+        return await resp.Content.ReadAsStringAsync(cts.Token);
     }
 
     // ─── DelegatingHandler that injects a fixed bearer token ─────────────────
