@@ -41,6 +41,8 @@ public class RedirectUriRejectionTests
         // 302 Redirect to Entra; the Location header should target login.microsoftonline.com
         resp.StatusCode.Should().Be(HttpStatusCode.Redirect);
         resp.Headers.Location!.Host.Should().Be("login.microsoftonline.com");
+
+        resp.Headers.Location.Query.Should().Contain("offline_access");
     }
 
     [Fact]

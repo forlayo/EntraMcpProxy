@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -66,7 +68,7 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
     {
         // 1. Build the proxy image from the repo Dockerfile.
         _proxyImage = new ImageFromDockerfileBuilder()
-            .WithDockerfileDirectory(CommonDirectoryPath.GetSolutionDirectory(), string.Empty)
+            .WithDockerfileDirectory(ResolveRepositoryRoot())
             .WithDockerfile("Dockerfile")
             .WithName(ProxyImage)
             .Build();
@@ -161,6 +163,35 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
         {
             BaseAddress = new Uri($"http://{_proxy.Hostname}:{_proxy.GetMappedPublicPort(80)}/"),
         };
+    }
+
+    internal static string ResolveRepositoryRoot()
+    {
+        var candidates = new[]
+        {
+            Environment.GetEnvironmentVariable("ENTRA_MCP_PROXY_REPOSITORY_ROOT"),
+            Directory.GetCurrentDirectory(),
+            AppContext.BaseDirectory,
+        };
+
+        foreach (var candidate in candidates.Where(c => !string.IsNullOrWhiteSpace(c)))
+        {
+            var dir = new DirectoryInfo(Path.GetFullPath(candidate!));
+            while (dir is not null)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "EntraMcpProxy.sln")) &&
+                    File.Exists(Path.Combine(dir.FullName, "Dockerfile")))
+                {
+                    return dir.FullName;
+                }
+
+                dir = dir.Parent;
+            }
+        }
+
+        throw new DirectoryNotFoundException(
+            "Cannot resolve the repository root. Set ENTRA_MCP_PROXY_REPOSITORY_ROOT " +
+            "to the directory containing EntraMcpProxy.sln and Dockerfile.");
     }
 
     /// <summary>
