@@ -9,11 +9,17 @@ namespace EntraMcpProxy.E2ETests;
 [Collection("E2E")]
 public class HealthzContainerTests
 {
+    private readonly ProxyContainerFixture _fx;
+
+    public HealthzContainerTests(ProxyContainerFixture fx)
+    {
+        _fx = fx;
+    }
+
     [Fact]
     public async Task Healthz_via_container_returns_200()
     {
-        await using var fx = await ProxyContainerFixture.StartAsync();
-        var resp = await fx.Http.GetAsync("/api/healthz");
+        var resp = await _fx.Http.GetAsync("/api/healthz");
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
     }
 }

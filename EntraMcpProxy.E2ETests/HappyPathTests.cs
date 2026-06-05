@@ -43,12 +43,18 @@ public class HappyPathTests
 {
     private const string TenantId = ProxyContainerFixture.FakeTenantId;
     private const string ClientId = ProxyContainerFixture.FakeClientId;
+    private static readonly TimeSpan McpOperationTimeout = TimeSpan.FromSeconds(20);
+
+    private readonly ProxyContainerFixture _fx;
+
+    public HappyPathTests(ProxyContainerFixture fx)
+    {
+        _fx = fx;
+    }
 
     [Fact(Timeout = 180_000)]
     public async Task User_token_flows_through_OBO_exchange_to_downstream()
     {
-        await using var fx = await ProxyContainerFixture.StartAsync();
-
         // 1. Generate the RSA keypair the test will use to sign user tokens.
         //    The public half is published via the JWKS stub so the proxy can
         //    validate the user token signature.
@@ -59,7 +65,7 @@ public class HappyPathTests
         //    These must be in place BEFORE the first authenticated request reaches
         //    the proxy, because JwtBearerHandler fetches the OIDC config lazily on
         //    first use.
-        await ConfigureFakeEntraAsync(fx.EntraAdminUrl, rsa, signingKey.KeyId);
+        await ConfigureFakeEntraAsync(_fx.EntraAdminUrl, rsa, signingKey.KeyId);
 
         // 3. Mint a user JWT signed with the RSA key whose public half was just published.
         var userToken = MintUserToken(signingKey, oid: "alice-e2e");
@@ -67,11 +73,11 @@ public class HappyPathTests
         // 4. Wait for the proxy to have registered the "fake__ping" tool so it can
         //    be called. The tool is discovered at startup, but we wait explicitly
         //    to avoid a race where the first call arrives before discovery completes.
-        await WaitForToolAsync(fx, userToken, toolName: "fake__ping", timeoutMs: 30_000);
+        await WaitForToolAsync(_fx, userToken, toolName: "fake__ping", timeoutMs: 30_000);
 
         // 5. Call tools/call via the MCP SDK client (handles MCP session lifecycle
         //    including initialize + tools/call).
-        var result = await CallFakePingAsync(fx, userToken);
+        var result = await CallFakePingAsync(_fx, userToken);
 
         // 6. Phase-10 provenance wrapping: tool result text is wrapped in
         //    <downstream-content source="{prefix}" tool="{toolName}">
@@ -86,7 +92,7 @@ public class HappyPathTests
             "the downstream tool result 'pong' must appear in the proxy response");
 
         // 7. Verify the downstream received an OBO-exchanged token, NOT the user's raw JWT.
-        var downstreamRequestsJson = await GetWireMockRequestsAsync(fx.DownstreamAdminUrl);
+        var downstreamRequestsJson = await GetWireMockRequestsAsync(_fx.DownstreamAdminUrl);
 
         downstreamRequestsJson.Should().NotContain(userToken,
             "the user's raw JWT must never reach the downstream; only the OBO-exchanged token should");
@@ -108,7 +114,11 @@ public class HappyPathTests
     {
         var proxyUri = fx.Http.BaseAddress!;
         var handler = new FixedBearerHandler(bearerToken, new HttpClientHandler());
-        var http = new HttpClient(handler, disposeHandler: true) { BaseAddress = proxyUri };
+        var http = new HttpClient(handler, disposeHandler: true)
+        {
+            BaseAddress = proxyUri,
+            Timeout = McpOperationTimeout,
+        };
 
         return await McpClient.CreateAsync(
             new HttpClientTransport(
@@ -119,7 +129,7 @@ public class HappyPathTests
             new McpClientOptions
             {
                 ClientInfo = new Implementation { Name = "e2e-test-client", Version = "0.0.0" },
-            });
+            }).WaitAsync(McpOperationTimeout);
     }
 
     /// <summary>
@@ -139,10 +149,18 @@ public class HappyPathTests
         {
             try
             {
-                await using var client = await CreateMcpClientAsync(fx, bearerToken);
-                var tools = await client.ListToolsAsync();
-                lastToolList = string.Join(", ", tools.Select(t => t.Name));
-                if (tools.Any(t => t.Name == toolName)) return;
+                var client = await CreateMcpClientAsync(fx, bearerToken);
+                try
+                {
+                    using var cts = new CancellationTokenSource(McpOperationTimeout);
+                    var tools = await client.ListToolsAsync(options: null, cancellationToken: cts.Token);
+                    lastToolList = string.Join(", ", tools.Select(t => t.Name));
+                    if (tools.Any(t => t.Name == toolName)) return;
+                }
+                finally
+                {
+                    await DisposeClientAsync(client);
+                }
             }
             catch (Exception ex)
             {
@@ -171,10 +189,32 @@ public class HappyPathTests
     private static async Task<IList<ContentBlock>> CallFakePingAsync(
         ProxyContainerFixture fx, string bearerToken)
     {
-        await using var client = await CreateMcpClientAsync(fx, bearerToken);
-        var result = await client.CallToolAsync(
-            new CallToolRequestParams { Name = "fake__ping", Arguments = null });
-        return result.Content;
+        var client = await CreateMcpClientAsync(fx, bearerToken);
+        try
+        {
+            using var cts = new CancellationTokenSource(McpOperationTimeout);
+            var result = await client.CallToolAsync(
+                new CallToolRequestParams { Name = "fake__ping", Arguments = null },
+                cancellationToken: cts.Token);
+            return result.Content;
+        }
+        finally
+        {
+            await DisposeClientAsync(client);
+        }
+    }
+
+    private static async Task DisposeClientAsync(McpClient client)
+    {
+        try
+        {
+            await client.DisposeAsync().AsTask().WaitAsync(McpOperationTimeout);
+        }
+        catch (TimeoutException)
+        {
+            // Best-effort cleanup only. The SDK sends a session DELETE on dispose;
+            // do not let a stalled cleanup request consume the whole E2E test timeout.
+        }
     }
 
     // ─── WireMock-Entra configuration ────────────────────────────────────────
@@ -312,8 +352,10 @@ public class HappyPathTests
     private static async Task PostMappingAsync(HttpClient http, object mapping)
     {
         var json = JsonSerializer.Serialize(mapping);
+        using var cts = new CancellationTokenSource(McpOperationTimeout);
         using var resp = await http.PostAsync("mappings",
-            new StringContent(json, Encoding.UTF8, "application/json"));
+            new StringContent(json, Encoding.UTF8, "application/json"),
+            cts.Token);
         resp.EnsureSuccessStatusCode();
     }
 
@@ -324,10 +366,11 @@ public class HappyPathTests
     /// </summary>
     private static async Task<string> GetWireMockRequestsAsync(string adminUrl)
     {
-        using var http = new HttpClient();
-        var resp = await http.GetAsync($"{adminUrl}/requests");
+        using var http = new HttpClient { Timeout = McpOperationTimeout };
+        using var cts = new CancellationTokenSource(McpOperationTimeout);
+        var resp = await http.GetAsync($"{adminUrl}/requests", cts.Token);
         resp.EnsureSuccessStatusCode();
-        return await resp.Content.ReadAsStringAsync();
+        return await resp.Content.ReadAsStringAsync(cts.Token);
     }
 
     // ─── DelegatingHandler that injects a fixed bearer token ─────────────────

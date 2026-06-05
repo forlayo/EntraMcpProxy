@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -8,6 +10,7 @@ using DotNet.Testcontainers.Builders;
 using DotNet.Testcontainers.Containers;
 using DotNet.Testcontainers.Images;
 using DotNet.Testcontainers.Networks;
+using Xunit;
 
 namespace EntraMcpProxy.E2ETests.Fixtures;
 
@@ -29,9 +32,11 @@ namespace EntraMcpProxy.E2ETests.Fixtures;
 /// McpClient.CreateAsync can send its MCP initialize handshake to the downstream.
 /// Individual tests layer additional or more specific mappings on top.
 /// </summary>
-public sealed class ProxyContainerFixture : IAsyncDisposable
+public sealed class ProxyContainerFixture : IAsyncLifetime
 {
     private const string ProxyImage = "entra-mcp-proxy:e2e";
+    private const int ProxyPort = 8080;
+    private static readonly TimeSpan ContainerWaitTimeout = TimeSpan.FromMinutes(3);
     // Pinned by digest for supply-chain hygiene. Tag '3.9.1' is preserved in the comment
     // for human readability; the digest is authoritative. Rotate both when bumping versions.
     // Source: docker inspect wiremock/wiremock:3.9.1 (resolved during Task 1.5 follow-up).
@@ -58,15 +63,17 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
     public static async Task<ProxyContainerFixture> StartAsync()
     {
         var fx = new ProxyContainerFixture();
-        await fx.InitAsync();
+        await fx.InitializeAsync();
         return fx;
     }
+
+    public Task InitializeAsync() => InitAsync();
 
     private async Task InitAsync()
     {
         // 1. Build the proxy image from the repo Dockerfile.
         _proxyImage = new ImageFromDockerfileBuilder()
-            .WithDockerfileDirectory(CommonDirectoryPath.GetSolutionDirectory(), string.Empty)
+            .WithDockerfileDirectory(ResolveRepositoryRoot())
             .WithDockerfile("Dockerfile")
             .WithName(ProxyImage)
             .Build();
@@ -83,7 +90,9 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
             .WithNetworkAliases("entra")
             .WithPortBinding(8080, true)
             .WithWaitStrategy(Wait.ForUnixContainer()
-                .UntilHttpRequestIsSucceeded(r => r.ForPort(8080).ForPath("/__admin/mappings")))
+                .UntilHttpRequestIsSucceeded(
+                    r => r.ForPort(8080).ForPath("/__admin/mappings"),
+                    w => w.WithTimeout(ContainerWaitTimeout)))
             .Build();
         await _entra.StartAsync().ConfigureAwait(false);
         EntraAdminUrl = $"http://{_entra.Hostname}:{_entra.GetMappedPublicPort(8080)}/__admin";
@@ -102,7 +111,9 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
             .WithNetworkAliases("downstream")
             .WithPortBinding(8080, true)
             .WithWaitStrategy(Wait.ForUnixContainer()
-                .UntilHttpRequestIsSucceeded(r => r.ForPort(8080).ForPath("/__admin/mappings")))
+                .UntilHttpRequestIsSucceeded(
+                    r => r.ForPort(8080).ForPath("/__admin/mappings"),
+                    w => w.WithTimeout(ContainerWaitTimeout)))
             .Build();
         await _downstream.StartAsync().ConfigureAwait(false);
         DownstreamAdminUrl = $"http://{_downstream.Hostname}:{_downstream.GetMappedPublicPort(8080)}/__admin";
@@ -121,7 +132,7 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
             // does not fire — E2E tests use a fake HTTP Entra that requires
             // RequireHttpsMetadata=false for JWT bearer to accept the HTTP authority.
             .WithEnvironment("ASPNETCORE_ENVIRONMENT", "E2ETest")
-            .WithEnvironment("ASPNETCORE_URLS", "http://+:80")
+            .WithEnvironment("ASPNETCORE_URLS", $"http://+:{ProxyPort}")
             .WithEnvironment("EntraId__Authority", $"http://entra:8080/{FakeTenantId}/v2.0")
             .WithEnvironment("EntraId__TenantId",   FakeTenantId)
             .WithEnvironment("EntraId__ClientId",   FakeClientId)
@@ -151,16 +162,47 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
             .WithEnvironment("DownstreamServers__0__OBO__DiscoveryScope",
                 "00000000-0000-0000-0000-000000000099/Discovery.Tools")
             .WithEnvironment("DownstreamServers__0__Enabled", "true")
-            .WithPortBinding(80, true)
+            .WithPortBinding(ProxyPort, true)
             .WithWaitStrategy(Wait.ForUnixContainer()
-                .UntilHttpRequestIsSucceeded(r => r.ForPort(80).ForPath("/api/healthz")))
+                .UntilHttpRequestIsSucceeded(
+                    r => r.ForPort(ProxyPort).ForPath("/api/healthz"),
+                    w => w.WithTimeout(ContainerWaitTimeout)))
             .Build();
         await _proxy.StartAsync().ConfigureAwait(false);
 
         Http = new HttpClient
         {
-            BaseAddress = new Uri($"http://{_proxy.Hostname}:{_proxy.GetMappedPublicPort(80)}/"),
+            BaseAddress = new Uri($"http://{_proxy.Hostname}:{_proxy.GetMappedPublicPort(ProxyPort)}/"),
         };
+    }
+
+    internal static string ResolveRepositoryRoot()
+    {
+        var candidates = new[]
+        {
+            Environment.GetEnvironmentVariable("ENTRA_MCP_PROXY_REPOSITORY_ROOT"),
+            Directory.GetCurrentDirectory(),
+            AppContext.BaseDirectory,
+        };
+
+        foreach (var candidate in candidates.Where(c => !string.IsNullOrWhiteSpace(c)))
+        {
+            var dir = new DirectoryInfo(Path.GetFullPath(candidate!));
+            while (dir is not null)
+            {
+                if (File.Exists(Path.Combine(dir.FullName, "EntraMcpProxy.sln")) &&
+                    File.Exists(Path.Combine(dir.FullName, "Dockerfile")))
+                {
+                    return dir.FullName;
+                }
+
+                dir = dir.Parent;
+            }
+        }
+
+        throw new DirectoryNotFoundException(
+            "Cannot resolve the repository root. Set ENTRA_MCP_PROXY_REPOSITORY_ROOT " +
+            "to the directory containing EntraMcpProxy.sln and Dockerfile.");
     }
 
     /// <summary>
@@ -319,7 +361,7 @@ public sealed class ProxyContainerFixture : IAsyncDisposable
         resp.EnsureSuccessStatusCode();
     }
 
-    public async ValueTask DisposeAsync()
+    public async Task DisposeAsync()
     {
         Http?.Dispose();
         if (_proxy      is not null) await _proxy.DisposeAsync().ConfigureAwait(false);

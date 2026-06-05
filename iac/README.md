@@ -53,7 +53,7 @@ These values are locked in the template. They cannot be weakened by optional par
 | Setting | Value | Why |
 |---|---|---|
 | `ASPNETCORE_ENVIRONMENT` | `Production` | Triggers all production-mode security checks in the proxy |
-| `ASPNETCORE_URLS` | `http://+:80` | Kestrel listens HTTP; ACA terminates TLS at the ingress |
+| `ASPNETCORE_URLS` | `http://+:8080` | Kestrel listens HTTP on a non-privileged port; ACA terminates TLS at the ingress |
 | `EntraId__RequireHttpsMetadata` | `true` | Phase 3 startup guard refuses `false` in Production |
 | `DownstreamServers__0__AuthType` | `OBOToken` | Identity delegation cannot be disabled |
 | Ingress `allowInsecure` | `false` | HTTPS-only external ingress |
