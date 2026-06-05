@@ -16,6 +16,7 @@ using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -52,15 +53,6 @@ builder.Services.AddOptions<List<DownstreamServerOptions>>()
     .Bind(builder.Configuration.GetSection("DownstreamServers"))
     .ValidateOnStart();
 builder.Services.AddSingleton<IValidateOptions<List<DownstreamServerOptions>>, DownstreamServerOptionsValidator>();
-
-// Pull the raw config values needed for the existing code paths below
-// (authority, client-id, tenant-id).  Using builder.Configuration[...] here
-// is intentional — these values are already validated by the Options layer
-// above, so the only path where they are empty is a misconfiguration that
-// ValidateOnStart will catch before any request is processed.
-var entraAuthority = builder.Configuration["EntraId:Authority"] ?? "";
-var entraClientId  = builder.Configuration["EntraId:ClientId"]  ?? "";
-var entraTenantId  = builder.Configuration["EntraId:TenantId"]  ?? "";
 
 // --- Authentication (Entra ID JWT — required) ---
 //
@@ -363,9 +355,10 @@ app.MapHealthChecks("/api/readyz", new HealthCheckOptions
 
 // OAuth AS facade — Claude Web constructs {mcp_url}/authorize and {mcp_url}/token
 // directly when configured with client_id+secret, so the proxy must expose these.
-app.MapGet("/.well-known/openid-configuration", (IPublicBaseUrlAccessor accessor) =>
+app.MapGet("/.well-known/openid-configuration", (IPublicBaseUrlAccessor accessor, IConfiguration config) =>
 {
     var baseUrl = accessor.Get();
+    var clientId = config["EntraId:ClientId"] ?? "";
     return Results.Json(new
     {
         issuer = baseUrl,
@@ -374,13 +367,15 @@ app.MapGet("/.well-known/openid-configuration", (IPublicBaseUrlAccessor accessor
         response_types_supported = new[] { "code" },
         grant_types_supported = new[] { "authorization_code", "refresh_token" },
         code_challenge_methods_supported = new[] { "S256" },
-        scopes_supported = new[] { "openid", "profile", "offline_access", $"api://{entraClientId}/user_impersonation" },
+        scopes_supported = new[] { "openid", "profile", "offline_access", $"api://{clientId}/user_impersonation" },
     });
 });
 
-app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectValidator, PkceValidator pkceValidator, AuditLog audit) =>
+app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectValidator, PkceValidator pkceValidator, AuditLog audit, IConfiguration config) =>
 {
     var q = context.Request.Query;
+    var clientId = config["EntraId:ClientId"] ?? "";
+    var tenantId = config["EntraId:TenantId"] ?? "";
 
     // H3: reject unlisted / malformed redirect_uri before any forwarding.
     var redirectUri = q["redirect_uri"].ToString();
@@ -415,13 +410,13 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
         });
     }
 
-    var entraAuthorize = $"https://login.microsoftonline.com/{entraTenantId}/oauth2/v2.0/authorize";
+    var entraAuthorize = $"https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/authorize";
     var qs = new Dictionary<string, string?>
     {
         ["response_type"]         = q["response_type"].ToString() is { Length: > 0 } rt ? rt : "code",
-        ["client_id"]             = entraClientId,
+        ["client_id"]             = clientId,
         ["redirect_uri"]          = redirectUri,
-        ["scope"]                 = $"openid profile offline_access api://{entraClientId}/user_impersonation",
+        ["scope"]                 = $"openid profile offline_access api://{clientId}/user_impersonation",
         ["state"]                 = q["state"],
         ["code_challenge"]        = q["code_challenge"],
         ["code_challenge_method"] = q["code_challenge_method"],
@@ -432,8 +427,11 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
     return Results.Redirect($"{entraAuthorize}?{queryString}");
 });
 
-app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory) =>
+app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory, IConfiguration config) =>
 {
+    var clientId = config["EntraId:ClientId"] ?? "";
+    var tenantId = config["EntraId:TenantId"] ?? "";
+
     // M13: reject oversized bodies before reading them all into memory.
     const int MaxBodyBytes = 8 * 1024;
     if (context.Request.ContentLength is long len && len > MaxBodyBytes)
@@ -460,13 +458,14 @@ app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory
         return;
     }
     var body = new string(buffer, 0, total);
+    var entraBody = await Program.BuildEntraTokenRequestBodyAsync(body, clientId);
 
     // M9: managed HttpClient lifecycle.
     var http = httpFactory.CreateClient("entra-token-relay");
-    var tokenEndpoint = $"https://login.microsoftonline.com/{entraTenantId}/oauth2/v2.0/token";
+    var tokenEndpoint = $"https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token";
     var req = new HttpRequestMessage(HttpMethod.Post, tokenEndpoint)
     {
-        Content = new StringContent(body, System.Text.Encoding.UTF8, "application/x-www-form-urlencoded"),
+        Content = new StringContent(entraBody, System.Text.Encoding.UTF8, "application/x-www-form-urlencoded"),
     };
     var resp = await http.SendAsync(req);
     var respBody = await resp.Content.ReadAsStringAsync();
@@ -476,16 +475,17 @@ app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory
 });
 
 // RFC 9728 — Protected Resource Metadata
-app.MapGet("/.well-known/oauth-protected-resource", (IPublicBaseUrlAccessor accessor) =>
+app.MapGet("/.well-known/oauth-protected-resource", (IPublicBaseUrlAccessor accessor, IConfiguration config) =>
 {
     var baseUrl = accessor.Get();
-    return Results.Json(new
-    {
-        resource = $"api://{entraClientId}",
-        authorization_servers = new[] { baseUrl },
-        bearer_methods_supported = new[] { "header" },
-        scopes_supported = new[] { "openid", "profile", "offline_access", $"api://{entraClientId}/user_impersonation" },
-    });
+    var clientId = config["EntraId:ClientId"] ?? "";
+    return Program.ProtectedResourceMetadata(baseUrl, resourcePath: null, clientId);
+});
+app.MapGet("/.well-known/oauth-protected-resource/{**resourcePath}", (string resourcePath, IPublicBaseUrlAccessor accessor, IConfiguration config) =>
+{
+    var baseUrl = accessor.Get();
+    var clientId = config["EntraId:ClientId"] ?? "";
+    return Program.ProtectedResourceMetadata(baseUrl, resourcePath, clientId);
 });
 
 // Auth middleware for MCP endpoints — all routes except the public ones require a valid bearer token.
@@ -509,8 +509,9 @@ app.Use(async (context, next) =>
     if (context.User.Identity?.IsAuthenticated != true)
     {
         context.Response.StatusCode = 401;
+        var metadataUrl = Program.BuildProtectedResourceMetadataUrl(publicBaseUrl.Get(), context.Request.Path.Value);
         context.Response.Headers["WWW-Authenticate"] =
-            $"Bearer resource_metadata=\"{publicBaseUrl.Get()}/.well-known/oauth-protected-resource\"";
+            $"Bearer resource_metadata=\"{metadataUrl}\"";
         return;
     }
 
@@ -538,4 +539,85 @@ lifetime.ApplicationStopped.Register(() =>
 app.Run();
 
 // Marker for Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program>.
-public partial class Program { }
+public partial class Program
+{
+    internal static IResult ProtectedResourceMetadata(string baseUrl, string? resourcePath, string entraClientId)
+    {
+        return Results.Json(new
+        {
+            resource = BuildCanonicalMcpResource(baseUrl, resourcePath),
+            authorization_servers = new[] { baseUrl },
+            bearer_methods_supported = new[] { "header" },
+            scopes_supported = new[] { "openid", "profile", "offline_access", $"api://{entraClientId}/user_impersonation" },
+        });
+    }
+
+    internal static string BuildProtectedResourceMetadataUrl(string baseUrl, string? resourcePath)
+    {
+        var escapedPath = EscapeRelativePath(resourcePath);
+        return string.IsNullOrEmpty(escapedPath)
+            ? $"{baseUrl}/.well-known/oauth-protected-resource"
+            : $"{baseUrl}/.well-known/oauth-protected-resource/{escapedPath}";
+    }
+
+    internal static async Task<string> BuildEntraTokenRequestBodyAsync(string body, string entraClientId)
+    {
+        var fields = QueryHelpers.ParseQuery(body);
+        var grantType = fields.TryGetValue("grant_type", out var grantValues)
+            ? grantValues.FirstOrDefault()
+            : null;
+
+        var normalizeScope = string.Equals(grantType, "authorization_code", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(grantType, "refresh_token", StringComparison.OrdinalIgnoreCase);
+
+        var pairs = new List<KeyValuePair<string, string?>>();
+        foreach (var field in fields)
+        {
+            if (string.Equals(field.Key, "resource", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (normalizeScope && string.Equals(field.Key, "scope", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            foreach (var value in field.Value)
+            {
+                pairs.Add(new KeyValuePair<string, string?>(field.Key, value));
+            }
+        }
+
+        if (normalizeScope)
+        {
+            pairs.Add(new KeyValuePair<string, string?>(
+                "scope",
+                $"openid profile offline_access api://{entraClientId}/user_impersonation"));
+        }
+
+        using var content = new FormUrlEncodedContent(pairs);
+        return await content.ReadAsStringAsync();
+    }
+
+    private static string BuildCanonicalMcpResource(string baseUrl, string? resourcePath)
+    {
+        var escapedPath = EscapeRelativePath(resourcePath);
+        return string.IsNullOrEmpty(escapedPath)
+            ? baseUrl
+            : $"{baseUrl}/{escapedPath}";
+    }
+
+    private static string EscapeRelativePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return "";
+        }
+
+        return string.Join(
+            "/",
+            path.Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .Select(Uri.EscapeDataString));
+    }
+}

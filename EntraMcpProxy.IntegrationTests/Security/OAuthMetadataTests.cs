@@ -43,4 +43,40 @@ public class OAuthMetadataTests
             .Should()
             .Contain("offline_access");
     }
+
+    [Fact]
+    public async Task ProtectedResourceMetadata_advertises_public_base_url_as_resource()
+    {
+        await using var factory = new ProxyAppFactory();
+        using var client = factory.CreateClient();
+
+        var resp = await client.GetAsync("/.well-known/oauth-protected-resource");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("resource").GetString().Should().Be("https://proxy.test");
+        body.GetProperty("authorization_servers")
+            .EnumerateArray()
+            .Select(x => x.GetString())
+            .Should()
+            .Contain("https://proxy.test");
+    }
+
+    [Fact]
+    public async Task ProtectedResourceMetadata_path_variant_advertises_matching_mcp_resource()
+    {
+        await using var factory = new ProxyAppFactory();
+        using var client = factory.CreateClient();
+
+        var resp = await client.GetAsync("/.well-known/oauth-protected-resource/mcp");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("resource").GetString().Should().Be("https://proxy.test/mcp");
+        body.GetProperty("authorization_servers")
+            .EnumerateArray()
+            .Select(x => x.GetString())
+            .Should()
+            .Contain("https://proxy.test");
+    }
 }
