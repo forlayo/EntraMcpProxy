@@ -45,6 +45,23 @@ public class OAuthMetadataTests
     }
 
     [Fact]
+    public async Task OpenidConfiguration_advertises_entra_authority_as_issuer()
+    {
+        const string entraIssuer = "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0";
+
+        await using var factory = new ProxyAppFactory { EntraAuthority = entraIssuer };
+        using var client = factory.CreateClient();
+
+        var resp = await client.GetAsync("/.well-known/openid-configuration");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("issuer").GetString().Should().Be(entraIssuer);
+        body.GetProperty("authorization_endpoint").GetString().Should().Be("https://proxy.test/authorize");
+        body.GetProperty("token_endpoint").GetString().Should().Be("https://proxy.test/token");
+    }
+
+    [Fact]
     public async Task ProtectedResourceMetadata_advertises_public_base_url_as_resource()
     {
         await using var factory = new ProxyAppFactory();

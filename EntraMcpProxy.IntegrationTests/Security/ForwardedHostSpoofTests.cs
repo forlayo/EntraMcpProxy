@@ -30,7 +30,7 @@ public class ForwardedHostSpoofTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-        body.GetProperty("issuer").GetString().Should().Be(ConfiguredBase);
+        body.GetProperty("issuer").GetString().Should().Be("https://login.microsoftonline.com/00000000-0000-0000-0000-000000000001/v2.0");
         body.GetProperty("authorization_endpoint").GetString().Should().StartWith(ConfiguredBase);
         body.GetProperty("token_endpoint").GetString().Should().StartWith(ConfiguredBase);
         body.GetRawText().Should().NotContain("evil.example.com");

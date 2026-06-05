@@ -358,10 +358,11 @@ app.MapHealthChecks("/api/readyz", new HealthCheckOptions
 app.MapGet("/.well-known/openid-configuration", (IPublicBaseUrlAccessor accessor, IConfiguration config) =>
 {
     var baseUrl = accessor.Get();
+    var issuer = (config["EntraId:Authority"] ?? "").TrimEnd('/');
     var clientId = config["EntraId:ClientId"] ?? "";
     return Results.Json(new
     {
-        issuer = baseUrl,
+        issuer,
         authorization_endpoint = $"{baseUrl}/authorize",
         token_endpoint = $"{baseUrl}/token",
         response_types_supported = new[] { "code" },
