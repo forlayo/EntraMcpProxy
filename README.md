@@ -99,7 +99,7 @@ stringData:
 dotnet run
 # or
 docker build -t entra-mcp-proxy .
-docker run -p 8080:80 --env-file .env entra-mcp-proxy
+docker run -p 8080:8080 --env-file .env entra-mcp-proxy
 ```
 
 ### 4. Connect Claude Web
@@ -342,7 +342,7 @@ The category `EntraMcpProxy.Audit` emits one JSON record per security-relevant e
 
 ```bash
 docker build -t entra-mcp-proxy .
-docker run -p 8080:80 \
+docker run -p 8080:8080 \
   -e EntraId__Authority="https://login.microsoftonline.com/{tenant}/v2.0" \
   -e EntraId__TenantId="{tenant}" \
   -e EntraId__ClientId="{client-id}" \
