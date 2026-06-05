@@ -428,7 +428,12 @@ app.MapGet("/authorize", (HttpContext context, IRedirectUriValidator redirectVal
     return Results.Redirect($"{entraAuthorize}?{queryString}");
 });
 
-app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory, IConfiguration config) =>
+app.MapPost("/token", async (
+    HttpContext context,
+    IHttpClientFactory httpFactory,
+    IConfiguration config,
+    IOptions<ProxyOptions> proxyOptions,
+    ILogger<Program> logger) =>
 {
     var clientId = config["EntraId:ClientId"] ?? "";
     var tenantId = config["EntraId:TenantId"] ?? "";
@@ -470,6 +475,10 @@ app.MapPost("/token", async (HttpContext context, IHttpClientFactory httpFactory
     };
     var resp = await http.SendAsync(req);
     var respBody = await resp.Content.ReadAsStringAsync();
+    if (proxyOptions.Value.LogOAuthRequests)
+    {
+        logger.LogInformation("{OAuthTokenResponse}", OAuthTokenResponseDiagnostics.Summarize(respBody));
+    }
     context.Response.StatusCode = (int)resp.StatusCode;
     context.Response.ContentType = "application/json";
     await context.Response.WriteAsync(respBody);
