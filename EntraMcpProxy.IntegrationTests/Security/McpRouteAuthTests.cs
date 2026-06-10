@@ -58,4 +58,25 @@ public class McpRouteAuthTests
         resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
         resp.Headers.WwwAuthenticate.ToString().Should().Contain("Bearer");
     }
+
+    [Fact]
+    public async Task Root_mcp_route_returns_resource_metadata_challenge_without_bearer()
+    {
+        await using var factory = new ProxyAppFactory();
+        using var http = factory.CreateClient();
+
+        var req = new HttpRequestMessage(HttpMethod.Post, "/")
+        {
+            Content = new StringContent(
+                """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}""",
+                Encoding.UTF8,
+                "application/json"),
+        };
+
+        var resp = await http.SendAsync(req);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        resp.Headers.WwwAuthenticate.ToString().Should()
+            .Contain("resource_metadata=\"https://proxy.test/.well-known/oauth-protected-resource\"");
+    }
 }

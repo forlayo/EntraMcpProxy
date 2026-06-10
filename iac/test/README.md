@@ -9,7 +9,7 @@ The smoke test proves that:
 1. The proxy is reachable and its OAuth discovery document is correct
 2. Entra will issue a real access token for the proxy's audience (`api://<client-id>`)
 3. The JWT validation, OBO exchange, and downstream call all succeed end-to-end
-4. The MCP session lifecycle (initialize → tools/list → tools/call → delete) works correctly
+4. The MCP transport flow (initialize → tools/list → tools/call, plus optional session delete) works correctly
 5. Security controls are active: provenance wrapping (`<downstream-content>`) and tool namespacing (`azdevops__*`) are present in responses
 
 ### Why Device Code flow
@@ -83,11 +83,11 @@ chmod +x iac/test/test-mcp.sh
 | 1. Pre-flight: `/api/healthz` | Proxy process is alive; liveness check works | Operational baseline |
 | 1. Pre-flight: `/.well-known/openid-configuration` | OAuth discovery doc is well-formed; correct audience scope advertised | RFC 8414 / MCP OAuth discovery |
 | 2. Device Code auth | Entra will issue a token for `api://<client-id>/user_impersonation`; MFA and Conditional Access work | Real Entra authentication |
-| 3. MCP initialize + `Mcp-Session-Id` | JWT signature/issuer/audience validation passes; OBO exchange succeeds; MCP session created | N13, L17: JWT validation; Phase 7: OBO |
+| 3. MCP initialize | JWT signature/issuer/audience validation passes; OBO exchange succeeds; stateful or stateless MCP transport is accepted | N13, L17: JWT validation; Phase 7: OBO |
 | 4. `notifications/initialized` | MCP spec compliance (client must send this after initialize) | MCP protocol correctness |
 | 5. `tools/list` | Downstream connection is live; tools are namespaced (`azdevops__*`); description provenance prefix present | N5/N6: tool poisoning defense (Phase 9) |
 | 6. `tools/call` | Full call path works end-to-end; OBO token reaches downstream; `<downstream-content>` wrapping present | N11: tool result provenance (Phase 10) |
-| 7. DELETE session | Session lifecycle terminates correctly | MCP spec compliance |
+| 7. DELETE session | Stateful sessions terminate correctly; skipped for stateless transport | MCP spec compliance |
 
 ## Troubleshooting
 
@@ -112,7 +112,7 @@ The proxy rejected the access token. Common causes:
 
 ### `Mcp-Session-Id` header missing from initialize response
 
-The MCP SDK on the proxy did not return a session ID. Check the proxy application logs for startup errors or exceptions in the MCP middleware pipeline.
+This is expected for current deployments: the proxy runs MCP HTTP transport in stateless mode so Azure Container Apps load balancing, restarts, and revision changes do not invalidate replica-local sessions. The smoke scripts only send `Mcp-Session-Id` when a stateful deployment returns one.
 
 ### Tool call returns `isError: true` with a permissions message
 

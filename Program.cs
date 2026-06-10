@@ -145,7 +145,13 @@ builder.Services.AddMcpServer(options =>
         Tools = new() { ListChanged = true },
     };
 })
-.WithHttpTransport()
+.WithHttpTransport(options =>
+{
+    // The proxy is a tool-only gateway and runs behind Azure Container Apps.
+    // Stateless transport avoids replica-local MCP session IDs being invalidated
+    // by load balancing, restarts, or revision changes.
+    options.Stateless = true;
+})
 .WithListToolsHandler((request, ct) =>
 {
     var handler = request.Server.Services!.GetRequiredService<ProxyToolHandler>();
@@ -308,6 +314,39 @@ app.UseExceptionHandler();
 app.UseCors();
 app.UseRateLimiter();
 app.UseAuthentication();
+
+// Auth middleware for MCP endpoints — all routes except the public ones require a valid bearer token.
+// Run this after UseAuthentication and before UseAuthorization so MCP endpoint
+// challenges include RFC 9728 resource metadata instead of the default bare
+// JwtBearer challenge.
+var publicBaseUrl = app.Services.GetRequiredService<IPublicBaseUrlAccessor>();
+
+app.Use(async (context, next) =>
+{
+    if (context.Request.Path.StartsWithSegments("/api/healthz") ||
+        context.Request.Path.StartsWithSegments("/api/readyz") ||
+        context.Request.Path.StartsWithSegments("/metrics") ||
+        context.Request.Path.StartsWithSegments("/.well-known") ||
+        context.Request.Path.StartsWithSegments("/authorize") ||
+        context.Request.Path.StartsWithSegments("/token"))
+    {
+        await next();
+        return;
+    }
+
+    // Require authenticated user — return RFC 9728 compliant 401
+    if (context.User.Identity?.IsAuthenticated != true)
+    {
+        context.Response.StatusCode = 401;
+        var metadataUrl = Program.BuildProtectedResourceMetadataUrl(publicBaseUrl.Get(), context.Request.Path.Value);
+        context.Response.Headers["WWW-Authenticate"] =
+            $"Bearer resource_metadata=\"{metadataUrl}\"";
+        return;
+    }
+
+    await next();
+});
+
 app.UseAuthorization();
 
 // Block A compat: MCP spec MUST — DNS rebinding defense (Origin header validation).
@@ -498,40 +537,11 @@ app.MapGet("/.well-known/oauth-protected-resource/{**resourcePath}", (string res
     return Program.ProtectedResourceMetadata(baseUrl, resourcePath, clientId);
 });
 
-// Auth middleware for MCP endpoints — all routes except the public ones require a valid bearer token.
-// Resolve the accessor once at registration time (it is a singleton backed by IOptions<ProxyOptions>).
-var publicBaseUrl = app.Services.GetRequiredService<IPublicBaseUrlAccessor>();
-
-app.Use(async (context, next) =>
-{
-    if (context.Request.Path.StartsWithSegments("/api/healthz") ||
-        context.Request.Path.StartsWithSegments("/api/readyz") ||
-        context.Request.Path.StartsWithSegments("/metrics") ||
-        context.Request.Path.StartsWithSegments("/.well-known") ||
-        context.Request.Path.StartsWithSegments("/authorize") ||
-        context.Request.Path.StartsWithSegments("/token"))
-    {
-        await next();
-        return;
-    }
-
-    // Require authenticated user — return RFC 9728 compliant 401
-    if (context.User.Identity?.IsAuthenticated != true)
-    {
-        context.Response.StatusCode = 401;
-        var metadataUrl = Program.BuildProtectedResourceMetadataUrl(publicBaseUrl.Get(), context.Request.Path.Value);
-        context.Response.Headers["WWW-Authenticate"] =
-            $"Bearer resource_metadata=\"{metadataUrl}\"";
-        return;
-    }
-
-    await next();
-});
-
 // N14: explicit auth requirement on every MCP route, in addition to the
 // custom middleware. Defense in depth — if the middleware ordering or
 // path-exemption list ever changes, MCP routes stay protected.
 app.MapMcp().RequireAuthorization();
+app.MapMcp("/mcp").RequireAuthorization();
 
 // Block B: Graceful shutdown hooks — log drain window boundaries.
 // HostOptions.ShutdownTimeout (30s, set above) gives in-flight requests

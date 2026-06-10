@@ -108,7 +108,7 @@ In Claude Web → Settings → Integrations → Add MCP Server:
 
 | Field | Value |
 |---|---|
-| MCP Server URL | `https://{your-proxy-domain}` |
+| MCP Server URL | `https://{your-proxy-domain}/mcp` |
 | `client_id` | Application (client) ID from Entra ID |
 | `client_secret` | Client secret created in Entra ID |
 
@@ -120,15 +120,17 @@ Users authenticate once with their Entra ID account (SSO). All Azure DevOps acti
 
 ### OAuth Flow
 
-Claude Web does not discover the authorization server from `/.well-known/oauth-protected-resource` — it constructs `{mcp_url}/authorize` directly. The proxy acts as an AS facade, redirecting to Entra ID:
+Claude Web connects to the MCP endpoint at `/mcp` and uses the proxy as the authorization server. The proxy acts as an AS facade, redirecting to Entra ID:
 
 ```
+Claude Web → POST {proxy}/mcp
+Proxy      → 401 with resource_metadata={proxy}/.well-known/oauth-protected-resource/mcp
 Claude Web → GET {proxy}/authorize?client_id=...&code_challenge=...
 Proxy      → 302 → login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize
 Entra ID   → redirect back to claude.ai with code
 Claude Web → POST {proxy}/token
 Proxy      → forward → login.microsoftonline.com/{tenant}/oauth2/v2.0/token
-Claude Web → Bearer token in Authorization header on every MCP request
+Claude Web → Bearer token in Authorization header on every {proxy}/mcp request
 ```
 
 ### Identity Delegation
@@ -266,7 +268,7 @@ Users must exist in the Azure DevOps organization at `https://dev.azure.com/{org
 | `OBO:TargetScope` | `2a72489c-aab2-4b65-b93a-a91edccf33b8/Ado.Mcp.Tools` |
 | Claude Web `client_id` | Application (client) ID |
 | Claude Web `client_secret` | Client secret from Step 2 |
-| Claude Web MCP URL | `https://{your-proxy-domain}` |
+| Claude Web MCP URL | `https://{your-proxy-domain}/mcp` |
 
 ---
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MCP Auth Session Review"
+  short_description: "Debug repeated MCP connector logins"
+  default_prompt: "Review this MCP server for repeated login or reconnect issues. Classify the failing layer, identify root cause evidence, propose code/config fixes, and add regression tests for OAuth metadata, refresh-token behavior, exact MCP route mapping, and MCP session persistence."

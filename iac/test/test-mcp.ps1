@@ -9,11 +9,11 @@
 
       1. Pre-flight: /api/healthz + /.well-known/openid-configuration
       2. Device Code OAuth — user opens browser, enters code, signs in (MFA supported)
-      3. MCP initialize  -> captures Mcp-Session-Id
+      3. MCP initialize  -> detects stateful or stateless transport
       4. notifications/initialized (per MCP spec)
       5. tools/list      -> confirms provenance prefix '[Source: downstream=...]'
       6. tools/call      -> confirms <downstream-content> wrapping
-      7. DELETE session
+      7. DELETE session when stateful
       8. Summary table
 
     This validates every security control in the full call path without needing claude.ai.
@@ -99,7 +99,7 @@ function Write-Red    { param($Msg) Write-Host $Msg -ForegroundColor Red    }
 function Write-Step {
     param([string]$Num, [string]$Title)
     Write-Host ""
-    Write-Cyan "-- Step $Num: $Title ----------------------------------------------------"
+    Write-Cyan "-- Step ${Num}: $Title ----------------------------------------------------"
 }
 
 function Fail {
@@ -493,7 +493,8 @@ catch {
     }
 }
 
-# Capture Mcp-Session-Id (case-insensitive header lookup)
+# Capture optional Mcp-Session-Id (case-insensitive header lookup). The proxy
+# runs stateless in ACA, so current deployments do not return or require this.
 $SessionId = $null
 foreach ($key in $initResponse.Headers.Keys) {
     if ($key -ieq "Mcp-Session-Id") {
@@ -505,12 +506,6 @@ foreach ($key in $initResponse.Headers.Keys) {
         }
         break
     }
-}
-
-if ($null -eq $SessionId -or $SessionId -eq "") {
-    Mark-Fail "MCP initialize" "Mcp-Session-Id header missing"
-    Fail "The initialize response did not include an Mcp-Session-Id header." `
-         "The MCP SDK on the proxy may not have initialized correctly. Check proxy logs."
 }
 
 $contentType = $initResponse.Headers["Content-Type"]
@@ -536,20 +531,24 @@ $serverProtoVer  = if ($null -ne $initResultInner) { Get-Prop $initResultInner "
 $serverInfoObj   = if ($null -ne $initResultInner) { Get-Prop $initResultInner "serverInfo" $null } else { $null }
 $serverName      = if ($null -ne $serverInfoObj)   { Get-Prop $serverInfoObj "name" "n/a" }    else { "n/a" }
 $serverVer       = if ($null -ne $serverInfoObj)   { Get-Prop $serverInfoObj "version" "n/a" } else { "n/a" }
+$sessionLabel    = if ($null -ne $SessionId -and $SessionId -ne "") { "session=$SessionId" } else { "stateless" }
 
-Write-Green "  [OK] MCP initialize -> session=$SessionId ($($t4.ElapsedMilliseconds)ms)"
+Write-Green "  [OK] MCP initialize -> $sessionLabel ($($t4.ElapsedMilliseconds)ms)"
 Write-Host "       Protocol : $serverProtoVer"
 Write-Host "       Server   : $serverName v$serverVer"
 
-Mark-Pass "MCP initialize" "session=$SessionId, protocol=$serverProtoVer"
+Mark-Pass "MCP initialize" "$sessionLabel, protocol=$serverProtoVer"
 
-# Common headers for subsequent requests (includes session id)
+# Common headers for subsequent requests. Add the MCP session id only when a
+# stateful deployment returned one during initialize.
 $sessionHeaders = @{
     "Authorization"        = "Bearer $accessToken"
     "Content-Type"         = "application/json"
     "Accept"               = "application/json, text/event-stream"
-    "Mcp-Session-Id"       = $SessionId
     "MCP-Protocol-Version" = $protocolVer
+}
+if ($null -ne $SessionId -and $SessionId -ne "") {
+    $sessionHeaders["Mcp-Session-Id"] = $SessionId
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -824,30 +823,36 @@ if ($null -ne $selectedTool) {
 
 Write-Step "7" "DELETE session"
 
-$t8 = [System.Diagnostics.Stopwatch]::StartNew()
-try {
-    $deleteResponse = Invoke-WebRequest -Uri $mcpUrl -Method DELETE `
-        -Headers @{
-            "Authorization"  = "Bearer $accessToken"
-            "Mcp-Session-Id" = $SessionId
-        } -UseBasicParsing -ErrorAction Stop
-    $t8.Stop()
-    $delStatus = $deleteResponse.StatusCode
-    if ($delStatus -eq 200 -or $delStatus -eq 204) {
-        Write-Green "  [OK] DELETE session -> $delStatus ($($t8.ElapsedMilliseconds)ms)"
-    }
-    else {
-        Write-Yellow "  [NOTE] DELETE session returned $delStatus ($($t8.ElapsedMilliseconds)ms)"
-    }
+if ($null -eq $SessionId -or $SessionId -eq "") {
+    Write-Yellow "  [SKIP] Stateless MCP transport -- no session to delete"
+    Mark-Pass "DELETE session" "skipped (stateless transport)"
 }
-catch {
-    $t8.Stop()
-    $status = Get-ExceptionStatus $_
-    if ($status -eq 405) {
-        Write-Yellow "  [OK/NOTE] DELETE returned 405 (server does not allow client-initiated session termination -- expected)"
+else {
+    $t8 = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $deleteResponse = Invoke-WebRequest -Uri $mcpUrl -Method DELETE `
+            -Headers @{
+                "Authorization"  = "Bearer $accessToken"
+                "Mcp-Session-Id" = $SessionId
+            } -UseBasicParsing -ErrorAction Stop
+        $t8.Stop()
+        $delStatus = $deleteResponse.StatusCode
+        if ($delStatus -eq 200 -or $delStatus -eq 204) {
+            Write-Green "  [OK] DELETE session -> $delStatus ($($t8.ElapsedMilliseconds)ms)"
+        }
+        else {
+            Write-Yellow "  [NOTE] DELETE session returned $delStatus ($($t8.ElapsedMilliseconds)ms)"
+        }
     }
-    else {
-        Write-Yellow "  [WARN] DELETE session returned $status -- continuing ($($t8.ElapsedMilliseconds)ms)"
+    catch {
+        $t8.Stop()
+        $status = Get-ExceptionStatus $_
+        if ($status -eq 405) {
+            Write-Yellow "  [OK/NOTE] DELETE returned 405 (server does not allow client-initiated session termination -- expected)"
+        }
+        else {
+            Write-Yellow "  [WARN] DELETE session returned $status -- continuing ($($t8.ElapsedMilliseconds)ms)"
+        }
     }
 }
 

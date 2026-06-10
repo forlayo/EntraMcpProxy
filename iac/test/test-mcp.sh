@@ -463,13 +463,15 @@ elif [[ "$init_http_status" != "200" ]]; then
     fail "MCP initialize returned HTTP $init_http_status."
 fi
 
-# Extract Mcp-Session-Id (case-insensitive)
+# Extract optional Mcp-Session-Id (case-insensitive). The proxy runs stateless
+# in ACA, so current deployments do not return or require this header.
 SESSION_ID=$(echo "$init_headers" | grep -i '^Mcp-Session-Id:' | sed 's/^[^:]*:[[:space:]]*//' | tr -d '\r\n')
 
-if [[ -z "$SESSION_ID" ]]; then
-    mark_fail "MCP initialize" "Mcp-Session-Id header missing"
-    fail "The initialize response did not include an Mcp-Session-Id header." \
-         "The MCP SDK on the proxy may not have initialized correctly. Check proxy logs."
+SESSION_HEADER_ARGS=()
+SESSION_LABEL="stateless"
+if [[ -n "$SESSION_ID" ]]; then
+    SESSION_HEADER_ARGS=(-H "Mcp-Session-Id: $SESSION_ID")
+    SESSION_LABEL="session=$SESSION_ID"
 fi
 
 # Parse response (SSE or JSON)
@@ -492,12 +494,12 @@ server_name=$(echo "$init_json" | jq -r '.result.serverInfo.name // "n/a"')
 server_ver=$(echo "$init_json" | jq -r '.result.serverInfo.version // "n/a"')
 server_caps=$(echo "$init_json" | jq -c '.result.capabilities // {}')
 
-green "  [OK] MCP initialize → session=$SESSION_ID (${t4_elapsed}ms)"
+green "  [OK] MCP initialize → $SESSION_LABEL (${t4_elapsed}ms)"
 printf "       Protocol : %s\n" "$server_proto"
 printf "       Server   : %s v%s\n" "$server_name" "$server_ver"
 printf "       Caps     : %s\n" "$server_caps"
 
-mark_pass "MCP initialize" "session=$SESSION_ID, protocol=$server_proto"
+mark_pass "MCP initialize" "$SESSION_LABEL, protocol=$server_proto"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 4 — notifications/initialized
@@ -513,7 +515,7 @@ notif_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
-    -H "Mcp-Session-Id: $SESSION_ID" \
+    "${SESSION_HEADER_ARGS[@]}" \
     -H "MCP-Protocol-Version: $PROTOCOL_VER" \
     -d "$notif_body" 2>/dev/null) || notif_status="0"
 t5_elapsed=$(( $(now_ms) - t5 ))
@@ -540,7 +542,7 @@ list_response=$(curl -s -D - --max-time 30 \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
-    -H "Mcp-Session-Id: $SESSION_ID" \
+    "${SESSION_HEADER_ARGS[@]}" \
     -H "MCP-Protocol-Version: $PROTOCOL_VER" \
     -d "$list_body")
 list_curl_exit=$?
@@ -665,7 +667,7 @@ if [[ -n "$SELECTED_TOOL" ]]; then
         -H "Authorization: Bearer $ACCESS_TOKEN" \
         -H "Content-Type: application/json" \
         -H "Accept: application/json, text/event-stream" \
-        -H "Mcp-Session-Id: $SESSION_ID" \
+        "${SESSION_HEADER_ARGS[@]}" \
         -H "MCP-Protocol-Version: $PROTOCOL_VER" \
         -d "$call_body")
     call_curl_exit=$?
@@ -747,6 +749,10 @@ fi
 
 step "7" "DELETE session"
 
+if [[ -z "$SESSION_ID" ]]; then
+    yellow "  [SKIP] Stateless MCP transport — no session to delete"
+    mark_pass "DELETE session" "skipped (stateless transport)"
+else
 t8=$(now_ms)
 del_status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
     -X DELETE "$MCP_URL" \
@@ -760,6 +766,7 @@ elif [[ "$del_status" == "405" ]]; then
     yellow "  [OK/NOTE] DELETE returned 405 (server does not allow client-initiated session termination — expected) (${t8_elapsed}ms)"
 else
     yellow "  [WARN] DELETE session returned $del_status — continuing (${t8_elapsed}ms)"
+fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -350,7 +350,7 @@ output appFqdn string = containerApp.properties.configuration.ingress.fqdn
 output publicBaseUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
 
 @description('MCP endpoint URL — paste this into claude.ai Integrations.')
-output mcpEndpointUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
+output mcpEndpointUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}/mcp'
 
 @description('OAuth discovery document URL (for troubleshooting).')
 output oauthDiscoveryUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}/.well-known/openid-configuration'
@@ -359,4 +359,4 @@ output oauthDiscoveryUrl string = 'https://${containerApp.properties.configurati
 output healthzUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}/api/healthz'
 
 @description('Operator next-steps message.')
-output nextStepsMessage string = '=== DEPLOYMENT COMPLETE — NEXT STEPS ===\n\n1. VERIFY HEALTH\n   curl https://${containerApp.properties.configuration.ingress.fqdn}/api/healthz\n   Expected: HTTP 200 { "status": "Healthy" }\n\n2. UPDATE ENTRA APP REGISTRATION (if not already done)\n   In your Entra app registration, ensure the Web Redirect URI is EXACTLY:\n     https://claude.ai/api/mcp/auth_callback\n   (no trailing slash, no extra URIs)\n\n3. CONFIRM CLIENT SECRET IS IN KEY VAULT\n   The secret named "${clientSecretSecretName}" must exist in Key Vault "${keyVaultName}".\n   The Container App reads it via managed identity — no manual copy needed after rotation.\n\n4. CONNECT CLAUDE.AI\n   Go to claude.ai -> Settings -> Integrations -> Add integration\n   Set the MCP Server URL to:\n     https://${containerApp.properties.configuration.ingress.fqdn}\n   Users will authenticate with their Entra account on first use.\n\n5. RUN SANDBOX VALIDATION\n   Follow docs/sandbox-validation.md to verify end-to-end scenarios.\n'
+output nextStepsMessage string = '=== DEPLOYMENT COMPLETE — NEXT STEPS ===\n\n1. VERIFY HEALTH\n   curl https://${containerApp.properties.configuration.ingress.fqdn}/api/healthz\n   Expected: HTTP 200 { "status": "Healthy" }\n\n2. UPDATE ENTRA APP REGISTRATION (if not already done)\n   In your Entra app registration, ensure the Web Redirect URI is EXACTLY:\n     https://claude.ai/api/mcp/auth_callback\n   (no trailing slash, no extra URIs)\n\n3. CONFIRM CLIENT SECRET IS IN KEY VAULT\n   The secret named "${clientSecretSecretName}" must exist in Key Vault "${keyVaultName}".\n   The Container App reads it via managed identity — no manual copy needed after rotation.\n\n4. CONNECT CLAUDE.AI\n   Go to claude.ai -> Settings -> Integrations -> Add integration\n   Set the MCP Server URL to:\n     https://${containerApp.properties.configuration.ingress.fqdn}/mcp\n   Users will authenticate with their Entra account on first use.\n\n5. RUN SANDBOX VALIDATION\n   Follow docs/sandbox-validation.md to verify end-to-end scenarios.\n'
